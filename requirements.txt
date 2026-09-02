@@ -1,0 +1,4 @@
+# Core — everything needed to run the policy and serve it. No AWS.
+pydantic>=2.7
+fastapi>=0.115
+uvicorn[standard]>=0.30

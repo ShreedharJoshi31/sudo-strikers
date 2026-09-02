@@ -1,0 +1,36 @@
+id: contender
+name: Contender
+short_name: CON
+logo: "🎯"
+colors:
+  primary: "#1971c2"
+  secondary: "#e7f5ff"
+  accent: "#0b2545"
+formation: "2-1-1"
+
+tactics: |
+  Win the ball back inside three seconds of losing it.
+  Move it forward early; short and clean beats long and hopeful.
+  Shoot when the lane is open rather than working for a better angle.
+
+players:
+  - number: 1
+    name: Keeper
+    role: GK
+    prompt: Hold the angle between ball and goal. Restart fast to the most advanced open teammate.
+  - number: 4
+    name: Bell
+    prompt: Hold the back line. Do not both step up at once - read your partner.
+  - number: 5
+    name: Ward
+    prompt: Cover behind whoever presses.
+  - number: 9
+    name: Cruz
+    prompt: Link the lines. Screen the middle when they have it, break forward when we win it.
+  - number: 11
+    name: Nero
+    prompt: Run wide, then cut inside to shoot.
+
+agent:
+  transport: http
+  url: http://127.0.0.1:8081/invocations

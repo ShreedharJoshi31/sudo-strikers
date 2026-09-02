@@ -1,0 +1,63 @@
+#!/bin/bash
+set -e
+
+# ============================================================================
+# Deploy the agent to Amazon Bedrock AgentCore Runtime.
+#
+#   AWS_DEFAULT_REGION=us-east-1 ./deploy.sh
+#
+# Staging keeps lib/ a single source of truth: it is copied into _build/ at
+# deploy time rather than duplicated into the runtime tree.
+#
+# Prerequisites:
+#   pip install bedrock-agentcore-starter-toolkit
+#   aws configure   (or export AWS_PROFILE)
+# ============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUILD_DIR="$SCRIPT_DIR/_build"
+
+AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+export AWS_DEFAULT_REGION
+
+echo "Checking prerequisites..."
+for tool in agentcore aws rsync; do
+  if ! command -v "$tool" &> /dev/null; then
+    echo "ERROR: '$tool' not found."
+    [ "$tool" = "agentcore" ] && echo "  Install: pip install bedrock-agentcore-starter-toolkit"
+    exit 1
+  fi
+done
+
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) || {
+  echo "ERROR: no valid AWS credentials."
+  exit 1
+}
+export AWS_ACCOUNT_ID
+echo "  account $AWS_ACCOUNT_ID / region $AWS_DEFAULT_REGION"
+
+cleanup() { rm -rf "$BUILD_DIR"; }
+trap cleanup EXIT
+
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR"
+
+cp "$SCRIPT_DIR/runtime/main.py" "$BUILD_DIR/main.py"
+rsync -a --exclude='__pycache__' "$SCRIPT_DIR/lib/" "$BUILD_DIR/lib/"
+cp "$SCRIPT_DIR/requirements-runtime.txt" "$BUILD_DIR/requirements.txt"
+
+sed \
+  -e "s|\${AWS_ACCOUNT_ID}|$AWS_ACCOUNT_ID|g" \
+  -e "s|\${AWS_DEFAULT_REGION}|$AWS_DEFAULT_REGION|g" \
+  "$SCRIPT_DIR/runtime/.bedrock_agentcore.yaml.template" > "$BUILD_DIR/.bedrock_agentcore.yaml"
+
+echo "Deploying from $BUILD_DIR ..."
+(cd "$BUILD_DIR" && agentcore deploy --auto-update-on-conflict)
+
+echo ""
+echo "Deployed. Point a team file at the runtime ARN:"
+echo ""
+echo "  agent:"
+echo "    transport: agentcore"
+echo "    runtime_arn: arn:aws:bedrock-agentcore:$AWS_DEFAULT_REGION:$AWS_ACCOUNT_ID:runtime/afc_contender"
+echo "    region: $AWS_DEFAULT_REGION"
