@@ -27,7 +27,6 @@ from fastapi.responses import JSONResponse
 
 import brain as brain_mod
 from brain import Squad
-from command import IDLE
 
 USE_LLM = os.environ.get("AFC_USE_LLM", "").lower() in ("1", "true", "yes")
 
@@ -50,13 +49,10 @@ squad = Squad(tactics=TACTICS, role_prompts=ROLE_PROMPTS, use_llm=USE_LLM)
 
 @app.post("/invocations")
 async def invocations(request: Request):
+    """The platform contract: {"gameState": ..., "teamId": N, "myPlayers": [i]}
+    in, a JSON ARRAY of commands out."""
     payload = await request.json()
-    player_id = payload.get("player_id")
-    observation = payload.get("observation")
-    if not player_id or not isinstance(observation, dict):
-        return JSONResponse(IDLE.model_dump())
-    cmd = squad.decide(player_id, observation)
-    return JSONResponse(cmd.model_dump())
+    return JSONResponse(squad.handle(payload))
 
 
 @app.get("/stats")
@@ -67,7 +63,10 @@ async def stats():
 @app.get("/ping")
 async def ping():
     return {"ok": True, "llm": USE_LLM,
-            "analysis": brain_mod.USE_ANALYSIS, "memory": brain_mod.USE_MEMORY}
+            "models": brain_mod.DEFAULT_MODELS,
+            "deadline_s": squad.deadline,
+            "analysis": brain_mod.USE_ANALYSIS, "memory": brain_mod.USE_MEMORY,
+            "scouting": brain_mod.USE_SCOUTING}
 
 
 if __name__ == "__main__":

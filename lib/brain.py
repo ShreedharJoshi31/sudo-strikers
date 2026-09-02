@@ -8,6 +8,19 @@ The ordering matters and is the whole point of this package:
 
 A late model answer costs nothing here, because a valid command already exists.
 Without step 1 a late answer costs the whole tick.
+
+WHAT A MISSED DECISION ACTUALLY COSTS
+-------------------------------------
+This was previously documented as "the platform substitutes IDLE" — that was
+taken from a description of a different simulator and is wrong for the Cup.
+The real platform makes the player HOLD THEIR LAST COMMAND. That is worse, not
+better: a stale MOVE_TO keeps dragging a player toward a position that stopped
+being useful seconds ago, and the tactical commands (SET_STANCE, CLEAR_OVERRIDE,
+RESET) persist until explicitly cleared.
+
+So step 1 matters more than it did, for a different reason. It is not insurance
+against standing still; it is a guarantee that a *current* command always exists
+to overwrite the stale one.
 """
 
 from __future__ import annotations
@@ -20,8 +33,10 @@ from dataclasses import dataclass, field
 
 import analysis
 import prompts
-from command import AgentCommand
+import wire
+from command import SAFE_DEFAULT, AgentCommand
 from memory import SquadMemory
+from scouting import Scout
 from policy import DEFAULT, Params, Policy
 
 
@@ -29,14 +44,56 @@ def _flag(name: str, default: str = "1") -> bool:
     return os.environ.get(name, default).lower() in ("1", "true", "yes")
 
 
-# Leaves room for network + serialisation inside the platform's 1.0s budget.
-DEFAULT_DEADLINE = float(os.environ.get("AFC_LLM_DEADLINE", "0.70"))
+# The platform's decision timeout is 5 SECONDS, not the 1.0s this was built
+# against — so the old 0.70 default was spending 14% of the available budget.
+#
+# We do not simply take 4.5s, for two reasons. Invocations arrive about every
+# 2 seconds, so a decision that outruns the cadence starts overlapping the next
+# one; and the workshop's own figures do not reconcile (a stated ~2s cadence
+# against ~64 ticks in a 5-minute match, which implies ~4.7s). Until the true
+# cadence is measured from tick/gameTime deltas in a practice match, sit inside
+# the stated cadence and hold the rest as headroom.
+#
+# Raise this only once measurement justifies it. The policy absorbs every miss,
+# so the failure mode of being too generous is silent staleness, not an error.
+DEFAULT_DEADLINE = float(os.environ.get("AFC_LLM_DEADLINE", "1.80"))
 DEFAULT_MODEL = os.environ.get("AFC_MODEL_ID", "amazon.nova-micro-v1:0")
+DEFAULT_REGION = os.environ.get("AFC_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+
+#: The four roles a player can hold. Index 0 is always the keeper; the rest
+#: come from the formation (see wire.DEFAULT_ROLES).
+ROLES: tuple[str, ...] = ("GK", "DEFENDER", "MIDFIELDER", "FORWARD")
+
+
+def _model_for_role(role: str) -> str:
+    """Which model this position runs on.
+
+    Positions do not carry equal load. The midfielder chooses between shooting,
+    a through ball and holding shape on nearly every touch; the keeper spends
+    most of the match holding an angle. Spending the same tokens and the same
+    latency on both is a waste at one end and a handicap at the other.
+
+    AFC_MODEL_<ROLE> wins, then AFC_MODEL_ID, then the built-in default. Roles
+    are resolved independently, so setting one leaves the others alone.
+
+        AFC_MODEL_MIDFIELDER=amazon.nova-pro-v1:0 \
+        AFC_MODEL_ID=amazon.nova-micro-v1:0
+
+    Raise a position only once /stats shows it has budget headroom to spare:
+    llm_late climbing is the model being too slow for its deadline, and a late
+    answer means the player keeps running the LAST command.
+    """
+    return os.environ.get(f"AFC_MODEL_{role.upper()}", "").strip() or DEFAULT_MODEL
+
+
+#: Resolved once at import so a deployment's model map is visible in one place.
+DEFAULT_MODELS: dict[str, str] = {r: _model_for_role(r) for r in ROLES}
 
 # Both default on but are switchable, because neither has been measured against
 # a real model yet. Turn one off and compare /stats and bench results.
 USE_ANALYSIS = _flag("AFC_ANALYSIS")
 USE_MEMORY = _flag("AFC_MEMORY")
+USE_SCOUTING = _flag("AFC_SCOUTING")
 
 
 @dataclass
@@ -54,6 +111,13 @@ class Stats:
     llm_error: int = 0
     policy_used: int = 0
     latencies: list[float] = field(default_factory=list)
+    rejections: dict[str, int] = field(default_factory=dict)
+    models: dict[str, str] = field(default_factory=dict)
+
+    def note_rejection(self, reason: str) -> None:
+        """Count why a model answer was thrown away, so it can be read back."""
+        key = (reason or "unknown").strip()[:80]
+        self.rejections[key] = self.rejections.get(key, 0) + 1
 
     def summary(self) -> dict:
         lat = sorted(self.latencies)
@@ -67,6 +131,10 @@ class Stats:
             "policy_used": self.policy_used,
             "llm_share": round(self.llm_used / total, 3) if total else 0.0,
             "p95_ms": round(p95 * 1000, 1),
+            "rejections": dict(
+                sorted(self.rejections.items(), key=lambda kv: -kv[1])[:8]
+            ),
+            "models": dict(sorted(self.models.items())),
         }
 
 
@@ -79,6 +147,7 @@ class Squad:
         role_prompts: dict[str, str] | None = None,
         params: Params = DEFAULT,
         model_id: str | None = None,
+        models: dict[str, str] | None = None,
         region: str | None = None,
         deadline: float = DEFAULT_DEADLINE,
         use_llm: bool = False,
@@ -87,13 +156,26 @@ class Squad:
         self.policy = Policy(params, seed=seed)
         self.params = params
         self.memory = SquadMemory()
+        # One Scout per process. Five runtimes each build their own from the
+        # same tick stream and, because it is deterministic, arrive at the same
+        # model without exchanging a single message - the same trick that lets
+        # defensive_assignment() divide up marking with no orchestrator.
+        self.scout = Scout()
         self.specs = {p.player_id: p for p in (players or [])}
         self.tactics = tactics
         self.role_prompts = role_prompts or {}
         self.deadline = deadline
         self.use_llm = use_llm
         self.model_id = model_id or DEFAULT_MODEL
-        self.region = region
+        # Per-role map layered over the squad default, so a caller can override
+        # one position without restating the other three.
+        self.models = dict(DEFAULT_MODELS)
+        if model_id:
+            self.models = {r: model_id for r in ROLES}
+        for role, mid in (models or {}).items():
+            if mid:
+                self.models[role.upper()] = mid
+        self.region = region or DEFAULT_REGION
         self.stats = Stats()
         self._agents: dict[str, object] = {}
         self._pool: ThreadPoolExecutor | None = (
@@ -118,9 +200,13 @@ class Squad:
         spec = self.specs.get(player_id)
         role_prompt = spec.prompt if spec else self.role_prompts.get(role, "")
 
-        kwargs = {"model_id": self.model_id}
+        model_id = self.models.get(role) or self.model_id
+        kwargs = {"model_id": model_id}
         if self.region:
             kwargs["region_name"] = self.region
+        # Recorded so /stats can show which model actually served each position,
+        # rather than which one the config intended.
+        self.stats.models[player_id] = f"{role}:{model_id}"
         agent = Agent(
             model=BedrockModel(**kwargs),
             system_prompt=prompts.build(
@@ -153,6 +239,14 @@ class Squad:
             recent = self.memory.for_player(player_id).summary()
             if recent:
                 payload["your_recent_ticks"] = recent
+        if USE_SCOUTING:
+            # What this opponent has actually done so far, in a few hundred
+            # bytes of plain statements. Deliberately not raw numbers: the model
+            # is better at acting on "their #3 presses hard and is tiring" than
+            # on a float, and it costs fewer tokens to say.
+            scouted = self.scout.summary()
+            if scouted:
+                payload["scouting"] = scouted
         return json.dumps(payload, separators=(",", ":"))
 
     def _think(self, player_id: str, obs: dict, model_input: str) -> AgentCommand:
@@ -206,17 +300,91 @@ class Squad:
 
         return finish(checked, "llm")
 
+    # ------------------------------------------------------------ platform
+    def handle(self, payload: dict) -> list[dict]:
+        """One platform invocation, end to end: payload in, wire commands out.
+
+        Lives here rather than in each entrypoint so the HTTP server and the
+        AgentCore runtime cannot drift apart on the part that has to be exactly
+        right - which team a player belongs to, and which way they are kicking.
+
+        Never raises. A thrown exception here would be a missed decision, and a
+        missed decision does not idle the player, it leaves the LAST command
+        running. Returning the safe default is strictly better than that: it is
+        current, it is valid, and repeating it is harmless.
+        """
+        try:
+            state = payload.get("gameState")
+            if not isinstance(state, dict):
+                raise ValueError("payload has no gameState")
+            mine = payload.get("myPlayers") or []
+            my_index = int(mine[0]) if mine else 0
+
+            obs = wire.to_observation(payload, my_index=my_index)
+            if USE_SCOUTING:
+                # Before deciding: this tick's evidence should inform this
+                # tick's choice. observe() is idempotent on the tick number, so
+                # a replayed or duplicated invocation cannot skew the model.
+                self.scout.observe(obs)
+                self._attach_scouting(obs)
+            cmd = self.decide(obs["you"]["id"], obs)
+
+            ok, reason = wire.validate(cmd, obs)
+            if not ok:
+                # The policy produced something the platform would drop. That is
+                # a bug in us, not in the model, so make it loud in the stats.
+                self.stats.note_rejection(f"policy: {reason}")
+                cmd = SAFE_DEFAULT
+            return wire.to_wire(cmd, wire.frame_for(payload), my_index)
+        except Exception as exc:  # noqa: BLE001 - a raise here costs the tick
+            self.stats.note_rejection(f"handle: {type(exc).__name__}: {exc}"[:80])
+            try:
+                idx = int((payload.get("myPlayers") or [0])[0])
+                return wire.to_wire(SAFE_DEFAULT, wire.frame_for(payload), idx)
+            except Exception:
+                return [{"commandType": SAFE_DEFAULT.type, "playerId": 0,
+                         "parameters": {"aggressive": False}, "duration": 0.0}]
+
+    def _attach_scouting(self, obs: dict) -> None:
+        """Replace the passing model's guessed constants with measured ones.
+
+        `passing.py` has to assume a top speed and a reaction delay for every
+        opponent, because the platform publishes neither. `scouting.py` measures
+        both, per opponent, from this match's own ticks. This method is the join
+        between them, and it is deliberately a dict key rather than an import:
+        neither module knows the other exists, so either can be swapped or
+        switched off without touching the other.
+
+        Scout's top speed is already discounted for fatigue, so it substitutes
+        for the guess rather than being scaled again on top of it.
+        """
+        for o in obs.get("opponents", ()):
+            oid = o.get("id")
+            if not oid:
+                continue
+            o["scout"] = {
+                "top_speed": self.scout.effective_top_speed(oid),
+                "reaction": self.scout.reaction_delay(oid),
+            }
+
     def _validate(self, cmd: AgentCommand, obs: dict) -> AgentCommand | None:
-        """Reject what the engine would silently turn into IDLE."""
+        """Reject anything the platform would silently drop.
+
+        Delegates to `wire.validate`, which checks against the live observation
+        rather than against the command in isolation - a PASS to a real player
+        who happens to be an opponent is well-formed and still wrong.
+
+        The rejection REASON is kept, not just the verdict. The platform drops
+        an invalid command without a word, so a model that quietly hallucinates
+        looks exactly like a model that is playing well until the score says
+        otherwise. `stats.rejections` is how that becomes visible.
+        """
         if cmd is None:
+            self.stats.note_rejection("no command returned")
             return None
-        if cmd.type == "GK_DIVE" and obs["you"]["role"] != "GK":
-            return None
-        if cmd.type in ("PASS", "MARK", "TACKLE"):
-            known = {m["id"] for m in obs["teammates"]} | {o["id"] for o in obs["opponents"]}
-            if cmd.target_player_id not in known:
-                return None
-        if cmd.type in ("MOVE_TO", "DRIBBLE", "GK_DIVE") and cmd.target is None:
+        ok, reason = wire.validate(cmd, obs)
+        if not ok:
+            self.stats.note_rejection(reason)
             return None
         return cmd
 

@@ -28,38 +28,41 @@ def _round(v: float, n: int = 1) -> float:
 
 
 def pass_options(obs: dict, p: Params, limit: int = 3) -> list[dict]:
-    """Teammates ranked the way the policy ranks them, with the inputs shown."""
-    me = obs["you"]
-    pos = me["position"]
-    goal = obs["pitch"]["opponent_goal"]["center"]
-    opps = obs["opponents"]
+    """Receivers ranked by whether the ball would actually arrive.
 
-    scored = []
-    for m in obs["teammates"]:
-        if m["role"] == "GK":
-            continue
-        mp = m["position"]
-        d = _dist(pos, mp)
-        clear = _lane(pos, mp, opps)
-        forward = mp[0] - pos[0]
-        score = (
-            forward * p.pass_gain_w
-            + clear * p.pass_lane_w
-            - abs(d - p.pass_ideal_dist) * p.pass_dist_w
-            + (20.0 - _dist(mp, goal)) * p.pass_goal_w
-        )
-        scored.append({
-            "id": m["id"],
-            "number": m.get("number"),
-            "role": m["role"],
-            "distance": _round(d),
-            "lane_clearance": _round(clear),
-            "forward_gain": _round(forward),
-            "blocked": clear < p.pass_min_lane or d > p.pass_max_dist,
-            "score": _round(score, 2),
+    Delegates to `passing.rank_passes`, which compares each opponent's time to
+    reach the lane against the ball's time to cross it, rather than measuring a
+    static gap. That is the difference between "someone is standing near this
+    line" and "someone gets to this line first", and only the second one loses
+    possession.
+
+    The fields handed to the model are chosen to be actionable: a probability
+    it can threshold, the seconds of margin, and WHO is the problem — so it can
+    reason about picking a different ball rather than just seeing a low number.
+    """
+    try:
+        import passing
+    except Exception:
+        return []
+
+    squeezed = obs["you"].get("pressure", 0.0) > p.pass_when_pressed
+    ranked = passing.rank_passes(
+        obs, policy="SAFEST" if squeezed else "BEST_VALUE"
+    )
+    out = []
+    for o in ranked[:limit]:
+        out.append({
+            "id": o.receiver_id,
+            "number": o.receiver_number,
+            "type": o.type,
+            "p_success": _round(o.p_success, 2),
+            "margin_s": _round(o.worst_margin, 2),
+            "contested_by": o.worst_opponent_id,
+            "forward_gain": _round(o.forward_gain),
+            "distance": _round(o.distance),
+            "blocked": o.p_success < p.pass_min_success,
         })
-    scored.sort(key=lambda x: -x["score"])
-    return scored[:limit]
+    return out
 
 
 def shot(obs: dict, p: Params) -> dict:

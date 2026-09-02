@@ -25,10 +25,22 @@ for candidate in (os.path.join(_HERE, "lib"), os.path.join(_HERE, "..", "lib")):
         sys.path.insert(0, os.path.normpath(candidate))
         break
 
+# Settings baked in by deploy.sh. A deployed runtime does NOT inherit the shell
+# that deployed it, so anything exported at deploy time is otherwise lost and
+# every AFC_* setting silently reverts to its built-in default. This must run
+# BEFORE brain is imported, because brain resolves the per-role model map at
+# import time. setdefault, not assignment: a variable genuinely set on the
+# runtime still wins over the baked-in value.
+try:
+    from afc_env import SETTINGS as _BAKED  # generated at deploy time
+except ImportError:  # local dev, or a deploy that baked nothing
+    _BAKED = {}
+for _key, _value in _BAKED.items():
+    os.environ.setdefault(_key, str(_value))
+
 from bedrock_agentcore.runtime import BedrockAgentCoreApp  # noqa: E402
 
-from brain import Squad  # noqa: E402
-from command import IDLE  # noqa: E402
+from brain import DEFAULT_MODELS, Squad  # noqa: E402
 
 app = BedrockAgentCoreApp()
 
@@ -49,14 +61,17 @@ ROLE_PROMPTS = {
 
 squad = Squad(tactics=TACTICS, role_prompts=ROLE_PROMPTS, use_llm=USE_LLM)
 
+# Printed once at cold start so a deployed runtime's model map shows up in
+# CloudWatch. Otherwise the only way to find out which model a position is
+# actually running is to lose a match and go digging.
+print(f"[afc] llm={USE_LLM} models={DEFAULT_MODELS}", flush=True)
+
 
 @app.entrypoint
-def invoke(payload: dict) -> dict:
-    player_id = payload.get("player_id")
-    observation = payload.get("observation")
-    if not player_id or not isinstance(observation, dict):
-        return IDLE.model_dump()
-    return squad.decide(player_id, observation).model_dump()
+def invoke(payload: dict) -> list[dict]:
+    """The platform sends {"gameState": ..., "teamId": N, "myPlayers": [i]} and
+    expects a JSON ARRAY of commands back."""
+    return squad.handle(payload)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,10 @@ Shaped around what the Cup organisers report separates teams:
     latency budget. Every line here has to earn its tokens.
   - Structured output is non-negotiable — handled by structured_output() in
     brain.py, so the prompt says nothing about JSON formatting.
+  - A missed decision does NOT idle the player: the platform makes them hold
+    their last command. The prompt says so, because "late means stale" is a
+    different risk from "late means still" and changes what the model should
+    trade away under time pressure.
 
 The per-tick user message carries the observation plus a precomputed `analysis`
 block (see analysis.py). The model is told to trust those numbers rather than
@@ -22,12 +26,18 @@ from command import DOCS, OUTFIELD
 _BASE = """You are the {role} (#{number}) in a 5-a-side Agentic Football Cup match.
 
 PITCH
-- {length}m x {width}m. You always attack toward +x.
-- Opponent goal x={length}, your goal x=0, both centred y={half_w}, goal width {goal_w}m.
-- Coordinates are metres, [x, y].
+- {length:.0f} x {width:.0f}. You always attack toward +x.
+- Opponent goal at x={length:.0f}, your goal at x=0, both centred on y={half_w:.0f}, {goal_w:.0f} wide.
+- Coordinates are [x, y].
+- The pitch is huge for five players. Space is usually there; lanes are usually
+  open; long chases cost real stamina. Hold your shape rather than following
+  the ball around.
 
-EVERY {interval:.0f} SECONDS you get the state and return exactly one command.
-You have under {budget:.1f}s. Late means you stand still for the whole tick.
+TIMING
+You get the state about every {interval:.0f} seconds and return exactly one command.
+Answer inside {budget:.1f}s. If you are late nothing pauses and you are NOT reset -
+YOUR PREVIOUS COMMAND KEEPS RUNNING. A stale order carries on dragging you
+somewhere that stopped being useful, so a fast ordinary answer beats a slow good one.
 
 COMMANDS
 {commands}
@@ -35,21 +45,25 @@ COMMANDS
 CHOOSING WELL
 - Using only one or two command types is the most common way to lose. A team
   that only passes gets closed down. Pick the command the situation asks for.
-- No ball, opponent has it: PRESS_BALL if you are nearest, else MARK your man.
-- No ball, loose: INTERCEPT if you are closest to where it is going, else MOVE_TO space.
-- No ball, teammate has it: MOVE_TO an angle they can actually play.
-- On the ball: SHOOT if the lane is open, PASS if a lane is better than your
-  own progress, DRIBBLE into space if neither, CLEAR only when pressed near
-  your own goal.
-- IDLE only to recover stamina when nothing is happening near you.
+- On the ball: SHOOT when the lane to a corner is open. PASS when a teammate is
+  better placed - GROUND to their feet, THROUGH into the space behind them,
+  AERIAL to clear someone standing in the lane. Otherwise MOVE_TO and carry it.
+- They have it: PRESS_BALL if you are nearest. Intensity is one dial - above
+  0.3 you challenge, above 0.5 you sprint. Otherwise MARK your man, or
+  FOLLOW_PLAYER to track a runner rather than hold a zone.
+- Ball loose: INTERCEPT if you are closest to where it is going, else MOVE_TO space.
+- Teammate has it: MOVE_TO an angle they can actually play.
+- SET_STANCE, CLEAR_OVERRIDE and RESET are STICKY - they outlive this tick and
+  keep applying. Use them to change the plan, never as an ordinary move.
 
 THE ANALYSIS BLOCK
 Each tick includes `analysis`, already computed for you:
 - `shot.distance_to_goal`, `shot.lane_clearance`, `shot.worth_taking`
-- `pass_options`, best first, with lane clearance and whether each is blocked
+- `pass_options`, best first, with interception risk and whether each is blocked
 - `space.freer_flank`, `space.opponents_within_6m`
 - `defending.you_are_presser`, `defending.your_mark` when they have the ball
-Trust these numbers. Do not recompute distances yourself — you do not have time.
+- `scouting`, what this opponent has actually done so far this match
+Trust these numbers. Do not recompute distances yourself - you do not have time.
 They are advice, not orders: override them when the wider picture says so.
 
 TEAM PLAN
@@ -68,11 +82,11 @@ def build(
     number: int,
     tactics: str,
     role_prompt: str,
-    length: float = 40.0,
-    width: float = 25.0,
-    goal_width: float = 5.0,
+    length: float = 110.0,
+    width: float = 70.0,
+    goal_width: float = 10.0,
     interval: float = 2.0,
-    budget: float = 1.0,
+    budget: float = 1.8,
 ) -> str:
     allowed = DOCS.keys() if role == "GK" else OUTFIELD
     return _BASE.format(

@@ -20,53 +20,99 @@ import math
 from dataclasses import dataclass
 
 from command import AgentCommand
+from wire import aim_location_for
 
 
 @dataclass(frozen=True)
 class Params:
+    """Thresholds for the policy.
+
+    SCALE NOTE — read before trusting any number here.
+
+    Every value below was originally tuned against the Agentic Football Arena,
+    an unofficial reconstruction played on a 40 x 25 pitch. The real Cup pitch
+    is 110 x 70: 2.75x longer, 2.8x wider, 7.7x the area, with the same five
+    players a side. The distances have therefore been rescaled geometrically
+    (lengths x2.75, the width-axis term x2.8).
+
+    A geometric rescale is a STARTING POINT, NOT A TUNING. Player and ball
+    speeds are unpublished, so the ratio of "distance a player can cover in one
+    tick" to "pitch size" is unknown and is what these gates really encode.
+    Re-derive them from practice matches before believing any of them.
+
+    Two consequences of the new ratio that the numbers alone do not show:
+    each player now covers ~2.2x the area a real footballer does, so space is
+    abundant and lanes are usually open; and pressing costs far more stamina
+    over these distances than it did on the small pitch.
+
+    Dimensionless values (fractions, ratios, weights, stamina) are NOT scaled.
+    """
+
     # --- shooting: (max distance, minimum lane clearance) gates, nearest first
-    shoot_near_dist: float = 11.0
-    shoot_near_lane: float = 0.7
-    shoot_mid_dist: float = 16.5
-    shoot_mid_lane: float = 2.0
-    shoot_far_dist: float = 23.0
-    shoot_far_lane: float = 3.6
-    tired_shoot_penalty: float = 2.0      # shrink near-range when stamina is low
-    tired_stamina: float = 45.0
+    shoot_near_dist: float = 30.25        # was 11.0
+    shoot_near_lane: float = 1.92         # was 0.7
+    shoot_mid_dist: float = 45.38         # was 16.5
+    shoot_mid_lane: float = 5.50          # was 2.0
+    shoot_far_dist: float = 63.25         # was 23.0
+    shoot_far_lane: float = 9.90          # was 3.6
+    tired_shoot_penalty: float = 5.50     # was 2.0; shrink near-range when stamina is low
+    tired_stamina: float = 45.0           # stamina units, not a distance - unscaled
 
     # --- passing
-    pass_max_dist: float = 24.0
-    pass_min_lane: float = 1.0
-    pass_ideal_dist: float = 10.0         # engine adds error per metre, so favour short
+    pass_max_dist: float = 66.0           # was 24.0
+    pass_min_lane: float = 2.75           # was 1.0
+    pass_ideal_dist: float = 27.5         # was 10.0; error grows per metre, so favour short
+    # The four score terms are each (distance x weight), so a uniform rescale of
+    # the distances leaves their relative balance untouched. The weights are
+    # therefore unchanged - only the bare distance constant below moved.
     pass_gain_w: float = 1.0
     pass_lane_w: float = 1.6
     pass_dist_w: float = 0.28
     pass_goal_w: float = 0.20
-    pass_when_pressed: float = 0.25
-    pass_score_floor: float = 1.2
+    pass_goal_ref: float = 55.0           # was a hardcoded 20.0 inside the scorer
+    pass_when_pressed: float = 0.25       # pressure units - unscaled
+    pass_score_floor: float = 3.30        # was 1.2; scores scale with the distances
+    pass_min_success: float = 0.45        # play it if the model says it likely arrives
 
     # --- carrying / clearing
-    clear_pressure: float = 1.1
-    clear_own_third: float = 0.35
-    carry_step: float = 9.0
+    clear_pressure: float = 1.1           # pressure units - unscaled
+    clear_own_third: float = 0.35         # fraction of pitch length - unscaled
+    carry_step: float = 24.75             # was 9.0
 
     # --- defending
-    tackle_range: float = 2.2
+    tackle_range: float = 6.05            # was 2.2
 
     # --- support shape
-    fwd_push: float = 8.0
-    mid_push: float = -2.0   # swept: holding just behind the ball beats pushing ahead of it
-    def_drop: float = 9.0
-    spread_y: float = 3.0
+    fwd_push: float = 22.0                # was 8.0
+    mid_push: float = -5.50               # was -2.0
+    def_drop: float = 24.75               # was 9.0
+    spread_y: float = 8.40                # was 3.0; width axis, so x2.8
 
     # --- goalkeeper
-    gk_depth_base: float = 1.0    # swept: a keeper off its line cannot get back within a 2s tick
-    gk_depth_gain: float = 0.10
-    gk_depth_max: float = 3.4
-    gk_dive_speed: float = 9.0
-    gk_dive_range: float = 12.0   # commands persist 2s; a late dive is a conceded goal
-    gk_claim_range: float = 3.0
-    gk_outlet_lane: float = 2.0
+    gk_depth_base: float = 2.75           # was 1.0
+    gk_depth_gain: float = 0.10           # depth per unit distance, a ratio - unscaled
+    gk_depth_max: float = 9.35            # was 3.4
+    gk_claim_range: float = 8.25          # was 3.0
+    gk_outlet_lane: float = 5.50          # was 2.0
+    # gk_dive_speed / gk_dive_range are gone with GK_DIVE, which the real
+    # platform does not implement. Keeper positioning is what saves goals.
+
+    # --- command parameters the real platform takes and the arena did not.
+    # PRESS_BALL is one dial covering what used to be two commands: above 0.3
+    # the player attempts tackles, above 0.5 they sprint. So the old TACKLE is
+    # simply a harder press, not a separate action.
+    press_intensity: float = 0.62         # sprints and challenges, but rations stamina
+    tackle_intensity: float = 0.88        # committed, for when the carrier is in range
+    # Pressing costs far more over 110x70 than it did over 40x25, so these are
+    # the first things to pull back if stamina curves look bad.
+    shoot_power_near: float = 0.62        # placement beats power close in
+    shoot_power_far: float = 1.0
+    shoot_aim_spread: float = 4.4         # was 1.6 on the small pitch
+    mark_tightness: str = "TIGHT"
+    intercept_aggressive: bool = True
+    carry_sprint_stamina: float = 35.0    # carry at pace while there is gas left
+    support_sprint_stamina: float = 25.0
+    through_ball_space: float = 16.5      # free space behind a receiver to play into
 
 
 DEFAULT = Params()
@@ -98,6 +144,54 @@ def _lane(frm, to, opponents, ignore_ids=()) -> float:
             continue
         best = min(best, _point_to_segment(o["position"], frm, to))
     return best
+
+
+def _best_pass(obs: dict, under_pressure: bool):
+    """Ask the interception model for a receiver and a pass type.
+
+    Imported here rather than at module scope on purpose: `passing.py` takes
+    its geometry helpers from this file, so a top-level import would be a
+    cycle. Python caches the module, so after the first call this is a dict
+    lookup and costs nothing measurable.
+
+    Returns None if the model has nothing to offer or fails. Policy is the
+    thing that must always answer, so it never lets an optional component
+    take a decision down with it.
+    """
+    try:
+        import passing
+        return passing.best_pass(
+            obs, policy="SAFEST" if under_pressure else "BEST_VALUE"
+        )
+    except Exception:
+        return None
+
+
+def _nearest_open_mate(obs: dict, mates: list, p: Params):
+    """Last-ditch pass target if the interception model is unavailable.
+
+    Deliberately crude - nearest teammate with a lane - because its only job is
+    to keep the ball moving on a path that should never run.
+    """
+    pos = obs["you"]["position"]
+    opts = [m for m in mates
+            if _dist(pos, m["position"]) <= p.pass_max_dist
+            and _lane(pos, m["position"], obs["opponents"]) >= p.pass_min_lane]
+    if not opts:
+        return None
+    return min(opts, key=lambda m: (_dist(pos, m["position"]), m["id"]))
+
+
+def _shot_power(d_goal: float, p: Params) -> float:
+    """Interpolate SHOOT power from range.
+
+    The platform takes power as 0..1 rather than a target point, and the goal
+    is only 10 wide in a 70-wide pitch, so distance shooting is low percentage.
+    Close in, trade power for placement; from range there is no point being coy.
+    """
+    span = max(1e-6, p.shoot_far_dist - p.shoot_near_dist)
+    t = max(0.0, min(1.0, (d_goal - p.shoot_near_dist) / span))
+    return round(p.shoot_power_near + (p.shoot_power_far - p.shoot_power_near) * t, 2)
 
 
 def _jitter(obs: dict, spread: float) -> float:
@@ -196,46 +290,59 @@ class Policy:
             or (d_goal < p.shoot_mid_dist and lane > p.shoot_mid_lane)
             or (d_goal < p.shoot_far_dist and lane > p.shoot_far_lane)
         ):
+            aim_point = (goal[0], goal[1] + _jitter(obs, p.shoot_aim_spread))
             return AgentCommand(
                 type="SHOOT",
-                target=(goal[0], goal[1] + _jitter(obs, 1.6)),
+                aim_location=aim_location_for(aim_point),
+                power=_shot_power(d_goal, p),
                 rationale=f"{d_goal:.0f}m, lane {lane:.1f}m",
             )
 
-        best, best_score = None, -1e9
-        for m in mates:
-            mp = m["position"]
-            d = _dist(pos, mp)
-            clear = _lane(pos, mp, opps)
-            if d > p.pass_max_dist or clear < p.pass_min_lane:
-                continue
-            score = (
-                (mp[0] - pos[0]) * p.pass_gain_w
-                + clear * p.pass_lane_w
-                - abs(d - p.pass_ideal_dist) * p.pass_dist_w
-                + (20.0 - _dist(mp, goal)) * p.pass_goal_w
-            )
-            if score > best_score:
-                best, best_score = m, score
-
+        # Receiver AND pass type both come from the interception model, which
+        # compares time-to-lane against ball flight rather than measuring a
+        # static gap. Under pressure ask for the safest ball; otherwise ask for
+        # the one worth playing, which is not the same question.
         pressure = me.get("pressure", 0.0)
-        if best is not None and (pressure > p.pass_when_pressed or best_score > p.pass_score_floor):
+        squeezed = pressure > p.pass_when_pressed
+        option = _best_pass(obs, squeezed)
+        if option is not None and (option.p_success >= p.pass_min_success or squeezed):
             return AgentCommand(
                 type="PASS",
-                target_player_id=best["id"],
-                rationale=f"lane to #{best['number']}",
+                target_player_id=option.receiver_id,
+                pass_type=option.type,
+                rationale=(option.reason or f"pass to #{option.receiver_number}")[:70],
             )
+        if option is None:
+            fallback = _nearest_open_mate(obs, mates, p)
+            if fallback is not None and squeezed:
+                return AgentCommand(
+                    type="PASS", target_player_id=fallback["id"], pass_type="GROUND",
+                    rationale=f"pressed, simple ball to #{fallback['number']}",
+                )
 
+        # The platform has no CLEAR. The nearest real equivalent to hammering it
+        # away is an AERIAL ball to whoever is furthest upfield: it travels over
+        # a defender in the lane instead of through them, which is the whole
+        # point of clearing. With nobody to aim at, carry it out instead.
         if pressure > p.clear_pressure and pos[0] < pitch["length"] * p.clear_own_third:
-            return AgentCommand(type="CLEAR", rationale="pressed deep")
+            outlet = max(mates, key=lambda m: m["position"][0], default=None)
+            if outlet is not None:
+                return AgentCommand(
+                    type="PASS",
+                    target_player_id=outlet["id"],
+                    pass_type="AERIAL",
+                    rationale="pressed deep, clear it long",
+                )
 
         if pos[0] > pitch["length"] * 0.62:
             toward = (pos[0] + p.carry_step, goal[1] * 0.55 + pos[1] * 0.45)
         else:
             toward = (pos[0] + p.carry_step, pos[1] + self._free_side(obs) * 3.0)
+        # No DRIBBLE on this platform: with possession, moving IS carrying.
         return AgentCommand(
-            type="DRIBBLE",
+            type="MOVE_TO",
             target=(_cx(toward[0], pitch["length"]), _cy(toward[1], pitch["width"])),
+            sprint=me["stamina"] > p.carry_sprint_stamina,
             rationale="carry into space",
         )
 
@@ -266,6 +373,7 @@ class Policy:
         return AgentCommand(
             type="MOVE_TO",
             target=(_cx(x, pitch["length"]), _cy(y, pitch["width"])),
+            sprint=me["stamina"] > p.support_sprint_stamina,
             rationale="offer an angle",
         )
 
@@ -278,13 +386,21 @@ class Policy:
         plan = defensive_assignment(obs)
         if plan["presser"] == me["id"]:
             carrier = next((o for o in obs["opponents"] if o["id"] == carrier_id), None)
+            # TACKLE does not exist; intensity above 0.3 already attempts one.
             if carrier is not None and _dist(me["position"], carrier["position"]) < p.tackle_range:
-                return AgentCommand(type="TACKLE", target_player_id=carrier["id"], rationale="in range")
-            return AgentCommand(type="PRESS_BALL", rationale="close the carrier")
+                return AgentCommand(
+                    type="PRESS_BALL", intensity=p.tackle_intensity, rationale="in range"
+                )
+            return AgentCommand(
+                type="PRESS_BALL", intensity=p.press_intensity, rationale="close the carrier"
+            )
 
         mark = plan["marks"].get(me["id"])
         if mark is not None:
-            return AgentCommand(type="MARK", target_player_id=mark, rationale="pick up runner")
+            return AgentCommand(
+                type="MARK", target_player_id=mark, tightness=p.mark_tightness,
+                rationale="pick up runner",
+            )
 
         home = me.get("home_position", me["position"])
         return AgentCommand(
@@ -301,7 +417,10 @@ class Policy:
         mine = _dist(me["position"], landing)
         others = [_dist(m["position"], landing) for m in obs["teammates"] if m["role"] != "GK"]
         if not others or mine <= min(others) + 0.3:
-            return AgentCommand(type="INTERCEPT", rationale="closest to the drop")
+            return AgentCommand(
+                type="INTERCEPT", aggressive=self.p.intercept_aggressive,
+                rationale="closest to the drop",
+            )
         return self._support(obs)
 
     # -------------------------------------------------------------- goalkeeper
@@ -310,31 +429,38 @@ class Policy:
         me = obs["you"]
         pitch = obs["pitch"]
         ball = obs["ball"]["position"]
-        bv = obs["ball"]["velocity"]
         goal = pitch["your_goal"]["center"]
         pos = me["position"]
 
+        # A keeper in possession restarts with GK_DISTRIBUTE, not PASS - the
+        # platform drops a PASS from the keeper. THROW is the accurate option
+        # and KICK the long one, so an open outlet gets thrown to and a covered
+        # one gets kicked clear. That kick is also the only CLEAR we still have.
         if obs["possession"] == "you":
             mates = [m for m in obs["teammates"] if m["role"] != "GK"]
-            safe = [m for m in mates
-                    if _lane(pos, m["position"], obs["opponents"]) > p.gk_outlet_lane]
-            if safe:
-                target = max(safe, key=lambda m: m["position"][0])
-                return AgentCommand(type="PASS", target_player_id=target["id"],
-                                    rationale="restart from the back")
-            return AgentCommand(type="CLEAR", rationale="no safe outlet")
+            if mates:
+                safe = [m for m in mates
+                        if _lane(pos, m["position"], obs["opponents"]) > p.gk_outlet_lane]
+                if safe:
+                    target = max(safe, key=lambda m: m["position"][0])
+                    return AgentCommand(
+                        type="GK_DISTRIBUTE", target_player_id=target["id"],
+                        method="THROW", rationale="restart from the back",
+                    )
+                furthest = max(mates, key=lambda m: m["position"][0])
+                return AgentCommand(
+                    type="GK_DISTRIBUTE", target_player_id=furthest["id"],
+                    method="KICK", rationale="no safe outlet, kick it long",
+                )
 
-        speed = math.hypot(bv[0], bv[1])
-        if speed > p.gk_dive_speed and bv[0] < -2.0 and ball[0] < 16.0:
-            t = max(0.05, (ball[0] - goal[0] - 0.4) / max(-bv[0], 0.1))
-            aim_y = ball[1] + bv[1] * t
-            if abs(aim_y - goal[1]) < pitch["your_goal"]["width"] and _dist(pos, ball) < p.gk_dive_range:
-                return AgentCommand(type="GK_DIVE",
-                                    target=(goal[0] + 0.6, _cy(aim_y, pitch["width"])),
-                                    rationale="shot incoming")
-
+        # There is no GK_DIVE on this platform. That costs nothing measurable:
+        # sweeping the old dive range over 6-18 changed no result, because at a
+        # ~2s decision interval a shot has already arrived. Positioning saves
+        # goals; the angle-holding MOVE_TO below is the keeper's real work.
         if _dist(pos, ball) < p.gk_claim_range and obs["possession"] != "opponent":
-            return AgentCommand(type="INTERCEPT", rationale="claim it")
+            return AgentCommand(
+                type="INTERCEPT", aggressive=p.intercept_aggressive, rationale="claim it"
+            )
 
         dx, dy = ball[0] - goal[0], ball[1] - goal[1]
         n = math.hypot(dx, dy) or 1.0
