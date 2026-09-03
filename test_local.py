@@ -26,7 +26,18 @@ PITCH = {
 }
 
 
-def _player(pid, role, x, y, number=1, has_ball=False):
+def _player(pid, role, x, y, number=None, has_ball=False):
+    """A player in the normalised shape wire.to_observation produces.
+
+    `number` is the 0-4 PLAYER INDEX, not a shirt number — that is what
+    wire.py:346 sets and what validate() and the wire both key on. The fixture
+    used to pass shirt numbers (1, 4, 5, 9, 11), which made validate reject
+    MARK/PASS targets that are perfectly legal in a real match, and made the
+    test suite disagree with production about what the model got wrong.
+    """
+    if number is None:
+        tail = str(pid).rsplit("_", 1)[-1]
+        number = int(tail) if tail.isdigit() else 0
     return {
         "id": pid, "number": number, "name": pid, "role": role,
         "position": [x, y], "velocity": [0.0, 0.0], "stamina": 90,
@@ -37,7 +48,7 @@ def _player(pid, role, x, y, number=1, has_ball=False):
 
 def obs(possession, *, me_role="FORWARD", me_xy=(82.5, 35.0), ball_xy=(82.5, 35.0),
         ball_vel=(0.0, 0.0), owner="home_3"):
-    me = _player("home_3", me_role, *me_xy, number=9, has_ball=(possession == "you"))
+    me = _player("home_3", me_role, *me_xy, has_ball=(possession == "you"))
     me["pressure"] = 0.3
     me["distance_to_opponent_goal"] = PITCH["length"] - me_xy[0]
     return {
@@ -50,17 +61,17 @@ def obs(possession, *, me_role="FORWARD", me_xy=(82.5, 35.0), ball_xy=(82.5, 35.
                  "owner_id": owner, "loose": possession == "loose"},
         "you": me,
         "teammates": [
-            _player("home_0", "GK", 7.2, 35.0, 1),
-            _player("home_1", "DEFENDER", 28.9, 22.4, 4),
-            _player("home_2", "DEFENDER", 28.9, 47.6, 5),
-            _player("home_4", "FORWARD", 68.8, 47.6, 11),
+            _player("home_0", "GK", 7.2, 35.0),
+            _player("home_1", "DEFENDER", 28.9, 22.4),
+            _player("home_2", "DEFENDER", 28.9, 47.6),
+            _player("home_4", "FORWARD", 68.8, 47.6),
         ],
         "opponents": [
-            _player("away_0", "GK", 102.9, 35.0, 1),
-            _player("away_1", "DEFENDER", 81.1, 22.4, 4),
-            _player("away_2", "DEFENDER", 81.1, 47.6, 5),
-            _player("away_3", "FORWARD", 41.3, 22.4, 9),
-            _player("away_4", "FORWARD", 41.3, 47.6, 11),
+            _player("away_0", "GK", 102.9, 35.0),
+            _player("away_1", "DEFENDER", 81.1, 22.4),
+            _player("away_2", "DEFENDER", 81.1, 47.6),
+            _player("away_3", "FORWARD", 41.3, 22.4),
+            _player("away_4", "FORWARD", 41.3, 47.6),
         ],
         "coach_message": "", "recent_events": [],
     }
@@ -122,7 +133,7 @@ def test_gk_distributes_not_passes():
 def test_shoots_when_clear():
     print("=== shoots from a clear position ===")
     o = obs("you", me_xy=(90.0, 35.0))
-    o["opponents"] = [_player("away_0", "GK", 37.4, 12.5, 1)]
+    o["opponents"] = [_player("away_0", "GK", 37.4, 12.5)]
     cmd = Policy(DEFAULT).decide("home_3", o)
     assert cmd.type == "SHOOT", f"expected SHOOT, got {cmd.type}"
     # The platform takes one of five enum corners, not a coordinate.
@@ -577,6 +588,113 @@ def test_agents_share_one_lib():
     print(f"  [ok] all five under 70 significant lines\n")
 
 
+
+
+# ---------------------------------------------------------------------------
+# Guardrails: hard football rules, from behaviour seen in real matches.
+# ---------------------------------------------------------------------------
+
+import guardrails                        # noqa: E402
+
+
+def _scene(role, pos, poss, owner=None):
+    o = obs(poss, me_role=role)
+    o["you"]["position"] = list(pos)
+    o["you"]["role"] = role
+    if owner:
+        o["ball"]["owner_id"] = owner
+    for x in o["opponents"]:
+        if x["role"] == "GK":
+            x["position"] = [o["pitch"]["length"] - 3, o["pitch"]["width"] / 2]
+    return o
+
+
+def test_gk_stays_home():
+    print("=== keeper cannot be walked upfield ===")
+    o = _scene("GK", (3, 35), "teammate")
+    limit = o["pitch"]["length"] * guardrails.GK_MAX_X_FRACTION
+    out, why = guardrails.apply(
+        AgentCommand(type="MOVE_TO", target=(90.0, 35.0)), o)
+    assert out.target[0] <= limit + 1e-6, f"keeper allowed to x={out.target[0]}"
+    assert why, "clamp must be reported"
+    print(f"  [ok] target x 90 -> {out.target[0]:.0f} ({why})")
+
+    out2, why2 = guardrails.apply(
+        AgentCommand(type="PRESS_BALL", intensity=0.8),
+        _scene("GK", (3, 35), "opponent", owner="away_2"))
+    assert out2.type == "MOVE_TO", f"keeper still pressing: {out2.type}"
+    print(f"  [ok] press outside box -> {out2.type}\n")
+
+
+def test_clear_our_own_box():
+    print("=== ball in our box gets sent away ===")
+    out, why = guardrails.apply(
+        AgentCommand(type="MOVE_TO", target=(20.0, 35.0)),
+        _scene("DEFENDER", (8, 35), "you"))
+    assert out.type == "PASS" and out.pass_type == "AERIAL", f"got {out.type}"
+    print(f"  [ok] outfield -> {out.type}/{out.pass_type} ({why})")
+
+    gk_out, _ = guardrails.apply(
+        AgentCommand(type="MOVE_TO", target=(9.0, 35.0)),
+        _scene("GK", (4, 35), "you"))
+    assert gk_out.type == "GK_DISTRIBUTE", f"got {gk_out.type}"
+    print(f"  [ok] keeper   -> {gk_out.type}/{gk_out.method}\n")
+
+
+def test_shoot_inside_their_box():
+    print("=== in their box with the ball means shoot ===")
+    for start in ("PASS", "MOVE_TO"):
+        cmd = (AgentCommand(type="PASS", target_player_id=2, pass_type="GROUND")
+               if start == "PASS" else
+               AgentCommand(type="MOVE_TO", target=(105.0, 35.0)))
+        out, why = guardrails.apply(cmd, _scene("FORWARD", (100, 32), "you"))
+        assert out.type == "SHOOT", f"{start} was not converted: {out.type}"
+        assert out.aim_location, "SHOOT needs an aim_location"
+        print(f"  [ok] {start:8s} -> SHOOT aim={out.aim_location} power={out.power}")
+    print()
+
+
+def test_challenge_the_carrier():
+    print("=== the carrier gets challenged ===")
+    near = _scene("DEFENDER", (30, 35), "opponent", owner="away_3")
+    for x in near["opponents"]:
+        if x["id"] == "away_3":
+            x["position"] = [32.0, 36.0]
+    out, why = guardrails.apply(
+        AgentCommand(type="MOVE_TO", target=(30.0, 35.0)), near)
+    assert out.type == "SLIDE_TACKLE", f"got {out.type}"
+    print(f"  [ok] carrier 2m  -> {out.type} on {out.target_player_id}")
+
+    far = _scene("DEFENDER", (30, 35), "opponent", owner="away_3")
+    for x in far["opponents"]:
+        if x["id"] == "away_3":
+            x["position"] = [42.0, 35.0]
+    out2, _ = guardrails.apply(
+        AgentCommand(type="MOVE_TO", target=(30.0, 35.0)), far)
+    assert out2.type == "PRESS_BALL", f"got {out2.type}"
+    print(f"  [ok] carrier 12m -> {out2.type} intensity={out2.intensity}\n")
+
+
+def test_guardrails_leave_good_commands_alone():
+    """The rules must not fire on ordinary play, or they replace the brain."""
+    print("=== ordinary play is untouched ===")
+    untouched = [
+        (AgentCommand(type="MOVE_TO", target=(60.0, 40.0)),
+         _scene("MIDFIELDER", (55, 35), "teammate")),
+        (AgentCommand(type="PASS", target_player_id=4, pass_type="THROUGH"),
+         _scene("MIDFIELDER", (60, 35), "you")),
+        (AgentCommand(type="MARK", target_player_id=2, tightness="TIGHT"),
+         _scene("DEFENDER", (25, 35), "opponent", owner="away_0")),
+        (AgentCommand(type="INTERCEPT", aggressive=True),
+         _scene("MIDFIELDER", (50, 35), "loose")),
+    ]
+    for cmd, o in untouched:
+        out, why = guardrails.apply(cmd, o)
+        assert why is None, f"{cmd.type} was overridden by: {why}"
+        assert out.type == cmd.type
+        print(f"  [ok] {cmd.type:12s} untouched")
+    print()
+
 if __name__ == "__main__":
     test_all_situations()
     test_gk_holds_the_angle()
@@ -602,4 +720,9 @@ if __name__ == "__main__":
     test_agents_pin_their_player()
     test_agent_pin_beats_bad_routing()
     test_agents_share_one_lib()
+    test_gk_stays_home()
+    test_clear_our_own_box()
+    test_shoot_inside_their_box()
+    test_challenge_the_carrier()
+    test_guardrails_leave_good_commands_alone()
     print("All local tests passed.")

@@ -38,6 +38,7 @@ from command import SAFE_DEFAULT, AgentCommand
 from memory import SquadMemory
 from scouting import Scout
 import gateway as gateway_mod
+import guardrails
 from policy import DEFAULT, Params, Policy
 
 
@@ -284,6 +285,15 @@ class Squad:
         safe = self.policy.decide(player_id, obs)
 
         def finish(cmd: AgentCommand, source: str) -> AgentCommand:
+            # Hard football rules, applied to model and policy alike. A rule
+            # that only guarded the model would leave the policy free to do
+            # the same thing, and the policy is what plays most ticks.
+            try:
+                cmd, why = guardrails.apply(cmd, obs)
+                if why:
+                    self.stats.note_rejection(f"guardrail: {why}")
+            except Exception as exc:  # noqa: BLE001 - never lose a tick to a rule
+                self.stats.note_rejection(f"guardrail-error: {type(exc).__name__}")
             if source == "llm":
                 self.stats.llm_used += 1
             else:
