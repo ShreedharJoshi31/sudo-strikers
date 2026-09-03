@@ -57,6 +57,7 @@ class GatewayTools:
         self.url = url or GATEWAY_URL
         self.token = token or GATEWAY_TOKEN
         self._client = None
+        self._open = False
         self._tools: list = []
         self._tried = False
         self._error: str | None = None
@@ -85,10 +86,19 @@ class GatewayTools:
                 from strands.tools.mcp.mcp_client import MCPClient
 
                 client = MCPClient(self._transport)
-                # list_tools_sync must run inside the client context or the
-                # connection is not yet open when the call is made.
-                with client:
-                    tools = client.list_tools_sync()
+                # Opened ONCE and held for the life of the process.
+                #
+                # The obvious `with client: ...` here is a trap: it closes the
+                # connection again on the way out, so every later use pays a
+                # fresh thread spawn, TCP connect, TLS handshake and MCP
+                # initialize - on the decision path, on every single tick. That
+                # is worth roughly 100ms a decision and it is entirely wasted,
+                # because the tool list does not change during a match.
+                #
+                # A runtime is long-lived, so the connection should be too.
+                client.__enter__()
+                self._open = True
+                tools = client.list_tools_sync()
                 self._client = client
                 self._tools = list(tools)
             except Exception as exc:                     # noqa: BLE001
@@ -109,9 +119,19 @@ class GatewayTools:
     def error(self) -> str | None:
         return self._error
 
+    def close(self) -> None:
+        """Release the long-lived connection. Only for shutdown and tests."""
+        if self._open and self._client is not None:
+            try:
+                self._client.__exit__(None, None, None)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._open = False
+
     def status(self) -> dict:
         return {
             "configured": bool(self.url),
+            "open": self._open,
             "connected": bool(self._tools),
             "tool_count": len(self._tools),
             "tool_names": [getattr(t, "tool_name", getattr(t, "name", "?"))
@@ -144,15 +164,20 @@ class _ExclusiveSession:
     options beats no decision at all.
     """
 
-    def __init__(self, client, wait: float) -> None:
+    def __init__(self, client, wait: float, already_open: bool = False) -> None:
         self._client = client
         self._wait = wait
         self._held = False
+        # When the connection is process-lifetime, this class serialises access
+        # to it and nothing more; entering it again is what breaks it.
+        self._already_open = already_open
 
     def __enter__(self):
         self._held = _SESSION_LOCK.acquire(timeout=self._wait)
         if not self._held:
             return None                       # busy: run tool-less this tick
+        if self._already_open:
+            return self._client               # open for the process; just serialise
         try:
             self._client.__enter__()
         except Exception:                     # noqa: BLE001
@@ -165,7 +190,11 @@ class _ExclusiveSession:
         if not self._held:
             return False
         try:
-            self._client.__exit__(*exc)
+            if not self._already_open:
+                # Only close what this context actually opened. Closing a
+                # process-lifetime connection here would make the NEXT tick pay
+                # a full reconnect, which is the cost we opened it once to avoid.
+                self._client.__exit__(*exc)
         except Exception:                     # noqa: BLE001
             pass                              # never mask the real outcome
         finally:
@@ -191,4 +220,17 @@ def session(tools: GatewayTools | None):
     """
     if tools is None or tools.client is None:
         return _NullContext()
-    return _ExclusiveSession(tools.client, SESSION_WAIT)
+    # Both halves of this are load-bearing and they solve different problems.
+    #
+    # The LOCK is because MCPClient is not re-entrant and a decision that misses
+    # its deadline is abandoned rather than stopped, so its thread is still
+    # inside the session when the next tick starts.
+    #
+    # `already_open` is because the connection is opened once in load() and held
+    # for the life of the process. Re-entering it per tick would pay a thread
+    # spawn, TCP connect, TLS handshake and MCP initialize on the decision path
+    # every time - and, worse, would be exactly the re-entry the lock exists to
+    # prevent.
+    return _ExclusiveSession(
+        tools.client, SESSION_WAIT, already_open=getattr(tools, "_open", False)
+    )
