@@ -295,11 +295,6 @@ class Squad:
         if the model ignores them it still has everything it had before.
         """
         payload = dict(obs)
-<<<<<<< HEAD
-        if USE_LEAN_INPUT:
-            payload["teammates"] = _lean(obs.get("teammates") or [])
-            payload["opponents"] = _lean(obs.get("opponents") or [])
-=======
         if not SEND_RAW_ROSTER:
             # The model keeps `you`, `ball`, `pitch` and `analysis`. What it
             # loses is nine raw player dicts it would have had to do geometry on
@@ -308,7 +303,6 @@ class Squad:
             # stops paying tokens to rediscover what was already computed.
             payload.pop("opponents", None)
             payload.pop("teammates", None)
->>>>>>> origin/prompt-optimize
         if USE_ANALYSIS:
             payload["analysis"] = analysis.analyse(
                 obs, self.params, policy_suggests=safe.type
