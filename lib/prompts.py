@@ -21,7 +21,7 @@ re-derive geometry, which is the slow, error-prone part for a small model.
 
 from __future__ import annotations
 
-from command import DOCS, OUTFIELD
+from command import DOCS, MAINTAINED, ONE_SHOT, STICKY, offered
 
 _BASE = """You are the {role} (#{number}) in a 5-a-side Agentic Football Cup match.
 
@@ -42,6 +42,13 @@ somewhere that stopped being useful, so a fast ordinary answer beats a slow good
 COMMANDS
 {commands}
 
+HOW LONG A COMMAND LASTS
+- ONE-SHOT ({one_shot}) finish on this tick.
+- MAINTAINED ({maintained}) KEEP RUNNING until you replace them. Re-issuing the
+  one you are already running spends a tick and changes nothing - only send it
+  when the target or the intent actually changes.
+- STICKY ({sticky}) outlive the tick and keep applying to the team.
+
 CHOOSING WELL
 - Using only one or two command types is the most common way to lose. A team
   that only passes gets closed down. Pick the command the situation asks for.
@@ -53,8 +60,8 @@ CHOOSING WELL
   FOLLOW_PLAYER to track a runner rather than hold a zone.
 - Ball loose: INTERCEPT if you are closest to where it is going, else MOVE_TO space.
 - Teammate has it: MOVE_TO an angle they can actually play.
-- SET_STANCE, CLEAR_OVERRIDE and RESET are STICKY - they outlive this tick and
-  keep applying. Use them to change the plan, never as an ordinary move.
+- SET_STANCE changes the team's shape and STICKS. Use it to change the plan,
+  never as an ordinary move.
 
 THE ANALYSIS BLOCK
 Each tick includes `analysis`, already computed for you:
@@ -62,6 +69,10 @@ Each tick includes `analysis`, already computed for you:
 - `pass_options`, best first, with interception risk and whether each is blocked
 - `space.freer_flank`, `space.opponents_within_6m`
 - `defending.you_are_presser`, `defending.your_mark` when they have the ball
+- `valid_targets`, the ONLY ids a target_player_id may name. They are strings
+  like "home_3" / "away_2", never bare numbers. PASS and GK_DISTRIBUTE take a
+  teammate; MARK and SLIDE_TACKLE take an opponent. Copy one from this list -
+  an id that is not in it is thrown away and you lose the tick.
 - `scouting`, what this opponent has actually done so far this match
 Trust these numbers. Do not recompute distances yourself - you do not have time.
 They are advice, not orders: override them when the wider picture says so.
@@ -88,7 +99,7 @@ def build(
     interval: float = 2.0,
     budget: float = 1.8,
 ) -> str:
-    allowed = DOCS.keys() if role == "GK" else OUTFIELD
+    allowed = offered(role)
     return _BASE.format(
         role=role,
         number=number,
@@ -99,6 +110,9 @@ def build(
         interval=interval,
         budget=budget,
         commands="\n".join(f"- {c}: {DOCS[c]}" for c in allowed),
+        one_shot=", ".join(c for c in ONE_SHOT if c in allowed),
+        maintained=", ".join(c for c in MAINTAINED if c in allowed),
+        sticky=", ".join(c for c in STICKY if c in allowed),
         tactics=tactics.strip() or "Keep shape, win the ball back fast, move it forward.",
         role_prompt=role_prompt.strip() or "Play your position.",
     )

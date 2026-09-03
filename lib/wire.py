@@ -512,6 +512,12 @@ def to_wire(command: AgentCommand, transform: Frame, player_index: int) -> list[
         params = {"intensity": float(command.intensity)}
     elif t == "MARK":
         params = {"target_player_id": int(command.target_player_id), "tightness": command.tightness}
+    elif t == "SLIDE_TACKLE":
+        params = {
+            "target_player_id": int(command.target_player_id),
+            "sprint": bool(command.sprint),
+            "distance": float(command.distance),
+        }
     elif t == "INTERCEPT":
         params = {"aggressive": bool(command.aggressive)}
     elif t == "SET_STANCE":
@@ -627,7 +633,12 @@ def validate(command: AgentCommand | None, obs: Mapping) -> tuple[bool, str]:
             return False, f"FOLLOW_PLAYER target_team {command.target_team!r} not in {TEAM_SIDES}"
         # Unlike MARK, this command names a side, so following a teammate is
         # legal. Validate against whichever side it actually named.
-        if command.target_team == TEAM_SIDE[me["team_code"]]:
+        # `me` normally carries team_code, but validate is also called on
+        # observations assembled by tests and by callers that build their own.
+        # Treat a missing code as "not my side" rather than raising: the
+        # opponent branch below is the stricter of the two.
+        my_side = TEAM_SIDE.get(me.get("team_code"))
+        if my_side is not None and command.target_team == my_side:
             ok, why = _is_teammate(command.target_player_id, teammates, my_number, "FOLLOW_PLAYER")
             if not ok:
                 return False, why

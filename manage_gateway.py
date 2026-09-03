@@ -33,6 +33,10 @@ _OBSERVATION = {
     "description": "The current observation exactly as received this tick.",
 }
 
+# NOTE: AgentCore Gateway's inputSchema accepts only type / properties /
+# required / items / description. `enum` is rejected outright at registration
+# time, so allowed values are spelled out in the description instead.
+
 TOOLS = [
     {
         "name": "evaluate_pass",
@@ -51,8 +55,10 @@ TOOLS = [
                 "properties": {
                     "observation": _OBSERVATION,
                     "receiver_id": {"type": "string", "description": "Teammate to pass to."},
-                    "pass_type": {"type": "string", "enum": ["GROUND", "AERIAL", "THROUGH"]},
-                    "policy": {"type": "string", "enum": ["SAFEST", "BEST_VALUE"]},
+                    "pass_type": {"type": "string",
+                                  "description": "GROUND, AERIAL or THROUGH."},
+                    "policy": {"type": "string",
+                               "description": "SAFEST or BEST_VALUE."},
                 },
                 "required": ["observation", "receiver_id"],
             },
@@ -73,7 +79,8 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "observation": _OBSERVATION,
-                    "policy": {"type": "string", "enum": ["SAFEST", "BEST_VALUE"]},
+                    "policy": {"type": "string",
+                               "description": "SAFEST or BEST_VALUE. Default BEST_VALUE."},
                     "limit": {"type": "integer", "description": "Max options (default 6)."},
                 },
                 "required": ["observation"],
@@ -173,14 +180,18 @@ def register(client, gateway_id: str) -> None:
         pass
 
     for tool in TOOLS:
-        if tool["name"] in existing:
-            print(f"  target {tool['name']} already registered", file=sys.stderr)
+        # Target names must match ([0-9a-zA-Z][-]?){1,100} — no underscores.
+        # The MCP tool name inside the schema is separate and DOES keep them,
+        # because that is what the model calls.
+        target_name = tool["lambda"]
+        if target_name in existing:
+            print(f"  target {target_name} already registered", file=sys.stderr)
             continue
         arn = f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:{LAMBDA_PREFIX}-{tool['lambda']}"
-        print(f"  registering {tool['name']} -> {arn}", file=sys.stderr)
+        print(f"  registering {target_name} (tool {tool['name']}) -> {arn}", file=sys.stderr)
         client.create_gateway_target(
             gatewayIdentifier=gateway_id,
-            name=tool["name"],
+            name=target_name,
             targetConfiguration={
                 "mcp": {
                     "lambda": {

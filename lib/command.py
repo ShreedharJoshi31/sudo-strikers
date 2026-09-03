@@ -45,6 +45,7 @@ CommandType = Literal[
     "PRESS_BALL",
     "MARK",
     "INTERCEPT",
+    "SLIDE_TACKLE",
     "SET_STANCE",
     "CLEAR_OVERRIDE",
     "RESET",
@@ -63,6 +64,20 @@ TeamSide = Literal["HOME", "AWAY"]
 #: GK_DISTRIBUTE from an outfield player.
 GK_ONLY: tuple[str, ...] = ("GK_DISTRIBUTE",)
 
+#: Commands that finish on the tick that issued them.
+ONE_SHOT: tuple[str, ...] = (
+    "MOVE_TO", "PASS", "SHOOT", "GK_DISTRIBUTE", "SLIDE_TACKLE",
+)
+
+#: Commands that KEEP RUNNING until something replaces them. Not sticky in the
+#: SET_STANCE sense (they die when the next command lands) but not one-shot
+#: either — re-issuing MARK on the man you are already marking spends a tick
+#: for nothing. The workshop's prompts group commands this way and ours did
+#: not, which left the model no way to tell the two apart.
+MAINTAINED: tuple[str, ...] = (
+    "PRESS_BALL", "MARK", "INTERCEPT", "FOLLOW_PLAYER",
+)
+
 #: These outlive the tick that issued them, so a caller must not treat them as
 #: an ordinary per-tick move: issuing one every tick pins the team's shape, and
 #: a stray RESET wipes overrides the rest of the squad is relying on.
@@ -71,6 +86,39 @@ STICKY: tuple[str, ...] = ("SET_STANCE", "CLEAR_OVERRIDE", "RESET")
 #: What an outfield player may be told to do. `prompts.py` builds the command
 #: menu from this, so a keeper sees eleven options and everyone else sees ten.
 OUTFIELD: tuple[str, ...] = tuple(c for c in COMMAND_TYPES if c not in GK_ONLY)
+
+#: Recovery commands, deliberately NOT offered to the model.
+#:
+#: Measured with Nova Micro: offered CLEAR_OVERRIDE, the keeper chose it on
+#: 6 of 6 ticks and stopped positioning entirely. It takes no parameters, which
+#: makes it the cheapest thing for a small model to emit, and it reads as safe.
+#: It is not — it is sticky and does nothing, so the player stands on the last
+#: order while the game moves.
+#:
+#: These exist to recover from a bad team state, which is a judgement about the
+#: whole squad that a single player looking at one tick cannot make. The policy
+#: never emits them either.
+RECOVERY: tuple[str, ...] = ("CLEAR_OVERRIDE", "RESET")
+
+#: Also withheld, for a different reason: the model cannot fill it in.
+#:
+#: FOLLOW_PLAYER is the only command needing target_player_id AND target_team
+#: together. Measured against Nova Micro over 10 decisions: it answered targets
+#: `82`, `83` and `825` — digits apparently scraped out of coordinates — and 4
+#: of 10 decisions were rejected. Withholding it took the same 10 decisions to
+#: 10/10 accepted with zero errors, and command diversity was unchanged at 3
+#: either way, because MARK already covers "track that opponent" with one
+#: fewer field to get right.
+#:
+#: Revisit on a larger model: this is a capability limit, not a bad command.
+TOO_HARD: tuple[str, ...] = ("FOLLOW_PLAYER",)
+
+WITHHELD: tuple[str, ...] = RECOVERY + TOO_HARD
+
+#: The menu actually shown to the model, per role.
+def offered(role: str) -> tuple[str, ...]:
+    allowed = COMMAND_TYPES if role == "GK" else OUTFIELD
+    return tuple(c for c in allowed if c not in WITHHELD)
 
 # SET_STANCE takes an int, not a name; these are the three legal values.
 STANCE_BALANCED = 0
@@ -106,14 +154,19 @@ DOCS: dict[str, str] = {
         "(\"HOME\" or \"AWAY\"); optional `distance`. Use to track a runner "
         "rather than hold a zone."
     ),
+    "SLIDE_TACKLE": (
+        "Commit to a sliding challenge. Needs `target_player_id`; optional "
+        "`sprint`, `distance`. High risk: mistimed it takes you out of the "
+        "play entirely. Prefer PRESS_BALL unless the carrier is getting away."
+    ),
     "SHOOT": (
-        "Strike at the opponent goal. Needs `aim_location`, one of "
+        "Requires the ball. Strike at the opponent goal. Needs `aim_location`, one of "
         "\"TL\" \"TR\" \"BL\" \"BR\" \"CENTER\"; optional `power` 0-1. "
         "Do NOT use `target` — you pick a corner, not a coordinate. "
         "Use when the lane to a corner is open."
     ),
     "PASS": (
-        "Play the ball to a teammate. Needs `target_player_id`; optional "
+        "Requires the ball. Play it to a teammate. Needs `target_player_id`; optional "
         "`pass_type` \"GROUND\" (safest), \"AERIAL\", or \"THROUGH\" "
         "(plays the space behind them)."
     ),
@@ -293,6 +346,12 @@ class AgentCommand(BaseModel):
                 raise ValueError("MARK needs target_player_id")
             if self.tightness is None:
                 self.tightness = DEFAULT_TIGHTNESS
+
+        elif t == "SLIDE_TACKLE":
+            if self.target_player_id is None:
+                raise ValueError("SLIDE_TACKLE needs target_player_id")
+            if self.distance is None:
+                self.distance = DEFAULT_FOLLOW_DISTANCE
 
         elif t == "SET_STANCE":
             if self.stance is None:

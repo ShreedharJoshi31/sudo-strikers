@@ -130,6 +130,58 @@ class _NullContext:
         return False
 
 
+class _ExclusiveSession:
+    """One thread inside the MCP client at a time.
+
+    Decisions run on a thread pool, and a call that misses its deadline is
+    ABANDONED, not stopped — its thread is still inside the session when the
+    next tick starts. MCPClient is not re-entrant, so the second thread used to
+    fail instantly, which showed up as every decision after the first timeout
+    erroring out. Measured: 4 of 5 ticks lost that way.
+
+    So entry is serialised. If the previous call still holds the session, this
+    one proceeds WITHOUT tools rather than failing: a decision with fewer
+    options beats no decision at all.
+    """
+
+    def __init__(self, client, wait: float) -> None:
+        self._client = client
+        self._wait = wait
+        self._held = False
+
+    def __enter__(self):
+        self._held = _SESSION_LOCK.acquire(timeout=self._wait)
+        if not self._held:
+            return None                       # busy: run tool-less this tick
+        try:
+            self._client.__enter__()
+        except Exception:                     # noqa: BLE001
+            _SESSION_LOCK.release()
+            self._held = False
+            return None
+        return self._client
+
+    def __exit__(self, *exc):
+        if not self._held:
+            return False
+        try:
+            self._client.__exit__(*exc)
+        except Exception:                     # noqa: BLE001
+            pass                              # never mask the real outcome
+        finally:
+            _SESSION_LOCK.release()
+            self._held = False
+        return False
+
+
+#: Module-level: one Gateway connection is shared by every player in a process.
+_SESSION_LOCK = threading.Lock()
+
+#: How long to wait for the session before giving up on tools for this tick.
+#: Short on purpose — the point is to not spend the decision budget queueing.
+SESSION_WAIT = float(os.environ.get("AFC_GATEWAY_SESSION_WAIT", "0.25"))
+
+
 def session(tools: GatewayTools | None):
     """Context manager to wrap an agent call in.
 
@@ -139,4 +191,4 @@ def session(tools: GatewayTools | None):
     """
     if tools is None or tools.client is None:
         return _NullContext()
-    return tools.client
+    return _ExclusiveSession(tools.client, SESSION_WAIT)

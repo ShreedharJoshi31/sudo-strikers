@@ -115,9 +115,26 @@ def marking(obs: dict) -> dict:
     }
 
 
+def valid_targets(obs: dict) -> dict:
+    """The ids a target_player_id is actually allowed to name.
+
+    Measured against Nova Micro: told only that FOLLOW_PLAYER "needs
+    target_player_id", it answered `3` and once `825` — a bare index and a
+    hallucination — and 5 of 8 decisions were rejected. The ids in play are
+    `home_3` / `away_2` strings, and nothing in the prompt said so.
+
+    Listing them costs a few dozen tokens and removes the guess entirely.
+    """
+    return {
+        "teammates": [m["id"] for m in obs.get("teammates", ())],
+        "opponents": [o["id"] for o in obs.get("opponents", ())],
+    }
+
+
 def analyse(obs: dict, p: Params = DEFAULT, policy_suggests: str | None = None) -> dict:
     """Everything above, in one block, for the model's input."""
     out = {
+        "valid_targets": valid_targets(obs),
         "shot": shot(obs, p),
         "pass_options": pass_options(obs, p),
         "space": open_space(obs),

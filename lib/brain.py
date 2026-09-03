@@ -317,7 +317,15 @@ class Squad:
             self.stats.llm_error += 1
             return finish(safe, "policy")
 
-        checked = self._validate(cmd, obs)
+        # _validate is the safety net, so it must never be the thing that
+        # fails. It reads fields off the observation, and an observation built
+        # by something other than wire.to_observation can be missing one; a
+        # raise here would escape decide() entirely instead of falling back.
+        try:
+            checked = self._validate(cmd, obs)
+        except Exception as exc:  # noqa: BLE001
+            self.stats.note_rejection(f"validate: {type(exc).__name__}: {exc}"[:80])
+            checked = None
         if checked is None:
             self.stats.llm_error += 1
             return finish(safe, "policy")

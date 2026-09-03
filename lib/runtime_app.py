@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 
+import brain
 import inbound
 from brain import DEFAULT_MODELS, Squad
 
@@ -111,9 +112,16 @@ def build(app, *, player_index: int, role: str, role_prompt: str,
     # Printed at cold start so the deployed runtime's identity and model show up
     # in CloudWatch. Otherwise the only way to find out which model a position
     # actually ran is to lose a match and go digging.
+    # Every feature flag, not just the model. These default to ON and are baked
+    # at deploy time, so the only way to know what a running agent actually has
+    # enabled is to print it — and finding out from a lost match is too late.
+    gw = squad.gateway.status()
     print(
         f"[afc] player={player_index} role={role} llm={enabled} "
-        f"model={DEFAULT_MODELS.get(role)}",
+        f"model={DEFAULT_MODELS.get(role)} deadline={squad.deadline}s "
+        f"analysis={brain.USE_ANALYSIS} memory={brain.USE_MEMORY} "
+        f"scouting={brain.USE_SCOUTING} "
+        f"gateway={'configured' if gw['configured'] else 'off'}",
         flush=True,
     )
     return squad
