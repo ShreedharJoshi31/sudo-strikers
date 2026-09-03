@@ -121,7 +121,13 @@ def build(app, *, player_index: int, role: str, role_prompt: str,
         f"model={DEFAULT_MODELS.get(role)} deadline={squad.deadline}s "
         f"analysis={brain.USE_ANALYSIS} memory={brain.USE_MEMORY} "
         f"scouting={brain.USE_SCOUTING} "
-        f"gateway={'configured' if gw['configured'] else 'off'}",
+        f"gateway={'configured' if gw['configured'] else 'off'} "
+        # The build stamp matters as much as the model here: when five runtimes
+        # disagree, the first question is always "are they even running the
+        # same code?", and answering that from CloudWatch alone beats
+        # reconstructing it from deploy logs afterwards.
+        f"build={os.environ.get('AFC_BUILD_SHA', 'unstamped')} "
+        f"lib={os.environ.get('AFC_LIB_HASH', 'unknown')}",
         flush=True,
     )
     return squad

@@ -127,6 +127,10 @@ OPPONENT_GOAL_CENTER = (PITCH_LENGTH, HALF_WIDTH)
 #: without a redeploy of this logic if the platform turns out to want it.
 EMIT_PLAYER_ID = os.environ.get("AFC_EMIT_PLAYER_ID", "0").lower() in ("1", "true", "yes")
 
+#: Duration stamped on commands that do not set their own. See
+#: policy.Params.command_duration - this is the env override for a live test.
+DURATION_DEFAULT = int(os.environ.get("AFC_COMMAND_DURATION", "0"))
+
 TEAM_HOME = 0
 TEAM_AWAY = 1
 TEAM_CODE: dict[int, str] = {TEAM_HOME: "home", TEAM_AWAY: "away"}
@@ -610,6 +614,11 @@ def to_wire(command: AgentCommand, transform: Frame, player_index: int) -> list[
         wire_command["playerId"] = int(player_index)
     # Integral durations go out as ints to match the documented sample exactly,
     # in case the platform's deserialiser is stricter than JSON.
+    # A command's own duration wins; otherwise fall back to the squad-wide
+    # Params.command_duration (0 = today's behaviour). See that field for why
+    # this exists and why it cannot be tested without a live match.
+    if not duration:
+        duration = DURATION_DEFAULT
     wire_command["duration"] = (
         int(duration) if float(duration).is_integer() else float(duration))
     return [wire_command]

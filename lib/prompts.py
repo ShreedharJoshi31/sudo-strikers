@@ -56,8 +56,8 @@ CHOOSING WELL
   better placed - GROUND to their feet, THROUGH into the space behind them,
   AERIAL to clear someone standing in the lane. Otherwise MOVE_TO and carry it.
 - They have it: PRESS_BALL if you are nearest. Intensity is one dial - above
-  0.3 you challenge, above 0.5 you sprint. Otherwise MARK your man, or
-  FOLLOW_PLAYER to track a runner rather than hold a zone.
+  0.3 you challenge, above 0.5 you sprint. Otherwise MARK your man. SLIDE_TACKLE
+  only when he is getting away - a miss takes you out of the play.
 - Ball loose: INTERCEPT if you are closest to where it is going, else MOVE_TO space.
 - Teammate has it: MOVE_TO an angle they can actually play.
 - SET_STANCE changes the team's shape and STICKS. Use it to change the plan,
@@ -69,10 +69,10 @@ Each tick includes `analysis`, already computed for you:
 - `pass_options`, best first, with interception risk and whether each is blocked
 - `space.freer_flank`, `space.opponents_within_6m`
 - `defending.you_are_presser`, `defending.your_mark` when they have the ball
-- `valid_targets`, the ONLY ids a target_player_id may name. They are strings
-  like "home_3" / "away_2", never bare numbers. PASS and GK_DISTRIBUTE take a
-  teammate; MARK and SLIDE_TACKLE take an opponent. Copy one from this list -
-  an id that is not in it is thrown away and you lose the tick.
+- `valid_targets`, the ONLY players a target_player_id may name. Copy an entry
+  from it verbatim; the trailing number is the player index and either spelling
+  works. PASS and GK_DISTRIBUTE take a teammate; MARK and SLIDE_TACKLE take an
+  opponent. Anything not in this list is thrown away and you lose the tick.
 - `scouting`, what this opponent has actually done so far this match
 Trust these numbers. Do not recompute distances yourself - you do not have time.
 They are advice, not orders: override them when the wider picture says so.

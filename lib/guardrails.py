@@ -54,6 +54,15 @@ TACKLE_RANGE = 4.0
 #: Close enough that pressing is worth the stamina.
 PRESS_RANGE = 18.0
 
+#: Commands that cannot be executed without the ball at your feet.
+#:
+#: The prompt says "Requires the ball" on each of these and the model ignores
+#: it: measured, it answered PASS on 3 of 3 ticks where a TEAMMATE had
+#: possession. Nothing caught it - `wire.validate` only rejects what the
+#: platform would drop, and an impossible pass is well-formed. It just does
+#: nothing, which is a wasted tick that reads as a healthy one.
+BALL_REQUIRED = ("PASS", "SHOOT", "GK_DISTRIBUTE")
+
 
 def _dist(a, b) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
@@ -100,13 +109,34 @@ def _carrier(obs: dict):
 
 # ------------------------------------------------------------------- rules
 
-def apply(cmd: AgentCommand, obs: dict) -> tuple[AgentCommand, str | None]:
-    """Return `(command, reason)`. `reason` is None when nothing was changed."""
+def apply(cmd: AgentCommand, obs: dict,
+          fallback: AgentCommand | None = None) -> tuple[AgentCommand, str | None]:
+    """Return `(command, reason)`. `reason` is None when nothing was changed.
+
+    `fallback` is the policy's command for this tick. It is used where the
+    model asked for something impossible and there is no single obviously
+    correct substitute — the policy has already worked out what this player
+    should be doing given who has the ball, so deferring to it beats inventing
+    a replacement here.
+    """
     me = obs.get("you") or {}
     role = me.get("role")
     pos = me.get("position") or [0.0, 0.0]
     have_ball = obs.get("possession") == "you"
     they_have_it = obs.get("possession") == "opponent"
+
+    # --- 0. You cannot kick a ball you do not have --------------------------
+    # Checked before anything else: every rule below reasons about what to do
+    # with the ball, and none of that applies if we have not got it.
+    if cmd.type in BALL_REQUIRED and not have_ball:
+        holder = obs.get("possession", "nobody")
+        if fallback is not None and fallback.type not in BALL_REQUIRED:
+            return fallback, f"{cmd.type} without the ball ({holder} has it)"
+        return (
+            AgentCommand(type="INTERCEPT", aggressive=True,
+                         rationale="go and win it first"),
+            f"{cmd.type} without the ball ({holder} has it)",
+        )
 
     # --- 1. Keeper leash -----------------------------------------------------
     # The one that was actually losing matches. A keeper's MOVE_TO is legal

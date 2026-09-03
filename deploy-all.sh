@@ -26,6 +26,43 @@ export AWS_DEFAULT_REGION
 ALL_AGENTS=("ai-gk" "ai-def1" "ai-def2" "ai-mid" "ai-fwd")
 if [ "$#" -gt 0 ]; then AGENTS=("$@"); else AGENTS=("${ALL_AGENTS[@]}"); fi
 
+# --------------------------------------------------------------- build guard
+#
+# TWO failures this is here to prevent, both of which happened for real and
+# both of which are SILENT - the deploy reports success and the agent plays a
+# whole match wrong:
+#
+#  1. Editing lib/ while a deploy is running. Agents are staged independently,
+#     so an edit part-way through ships DIFFERENT CODE to different players.
+#     Seen twice; once the forward kept a stale shooting gate while the other
+#     four had the fix. Parallel deploys make this more likely, not less.
+#  2. Deploying from a tree whose lib/ nobody can identify afterwards. One run
+#     shipped an `inbound.py` that exists in no commit; it answered an entire
+#     match with the safe default and took a log forensics pass to find.
+#
+# So: hash lib/ once, here, and have every agent verify that exact hash before
+# it stages. A dirty tree is allowed - during an event you often must deploy
+# uncommitted work - but it has to be deliberate and it gets stamped.
+# NOTE: computed from paths RELATIVE to SCRIPT_DIR, because shasum hashes the
+# filename as well as the bytes - an absolute path here and a relative one in
+# deploy-one.sh would disagree for identical code and abort every deploy.
+AFC_LIB_HASH="$(cd "$SCRIPT_DIR" && find lib -name '*.py' | sort | xargs shasum | shasum | cut -c1-16)"
+AFC_BUILD_SHA="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo nogit)"
+if ! git -C "$SCRIPT_DIR" diff --quiet HEAD -- lib 2>/dev/null; then
+  AFC_BUILD_SHA="$AFC_BUILD_SHA-dirty"
+  if [ "${AFC_ALLOW_DIRTY:-0}" != "1" ]; then
+    echo "ERROR: lib/ has uncommitted changes."
+    echo "  Commit them, or re-run with AFC_ALLOW_DIRTY=1 to ship them anyway."
+    echo "  (the build is stamped '-dirty' either way, so it stays traceable)"
+    exit 1
+  fi
+  echo "  WARNING: shipping uncommitted lib/ changes (AFC_ALLOW_DIRTY=1)"
+fi
+export AFC_LIB_HASH AFC_BUILD_SHA
+echo "  build $AFC_BUILD_SHA  lib $AFC_LIB_HASH"
+echo "  DO NOT EDIT lib/ until this finishes - agents stage independently."
+echo ""
+
 echo "Checking prerequisites..."
 for tool in agentcore aws rsync; do
   command -v "$tool" >/dev/null || {

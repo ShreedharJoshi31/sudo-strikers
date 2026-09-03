@@ -126,6 +126,27 @@ class Params:
     shoot_aim_spread: float = 4.4         # was 1.6 on the small pitch
     mark_tightness: str = "TIGHT"
     intercept_aggressive: bool = True
+    #: Ticks to keep a command alive for. UNVALIDATED HYPOTHESIS - see below.
+    #:
+    #: We currently emit duration=0 on everything. AGENT_PROTOCOL.md section 4
+    #: calls 0 "instant", but MEASURED in the 0-3 against Bonkers United: the
+    #: forward sent 20 PASS commands on 20 distinct ticks, held the ball on all
+    #: 20, had a median 1.4u pass to a receiver with 2.84u of lane clearance and
+    #: no opponent within 1.7u - and the ball stayed with the passer 17 times.
+    #: The platform echoed PASS back in `previousCommand` every time, so the
+    #: command was received; the engine then ran AdvanceToGoalWithBall instead.
+    #: Acceptance by type that match: MARK 100%, MOVE_TO 69%, PRESS_BALL 20%,
+    #: PASS 0%. Positional commands stick; on-ball commands do not.
+    #:
+    #: The one participant who measured durations was sending 3-5 and found
+    #: capping to 1 "worth more than any prompt change" - i.e. durations govern
+    #: persistence, and 0 is below their entire tested range. So 1 is the
+    #: smallest value that could let an on-ball command survive to execution.
+    #:
+    #: This CANNOT be validated offline: it changes what the ENGINE does, not
+    #: what we decide. It needs one practice match, judged on PASS acceptance.
+    #: 0 restores exactly today's behaviour.
+    command_duration: int = 0
     #: Highest ball (metres above the turf) still worth an INTERCEPT. Every
     #: other distance check here is 2D, so without this gate a ball sailing
     #: overhead looks like a loose ball at your feet and the whole team chases
@@ -263,7 +284,30 @@ def defensive_assignment(obs: dict) -> dict:
     goal = obs["pitch"]["your_goal"]["center"]
     carrier_id = obs["ball"]["owner_id"]
 
-    defenders = [me] + [m for m in obs["teammates"] if m["role"] != "GK"]
+    # KEEP A STRIKER UP THE PITCH.
+    #
+    # Every non-GK player used to be eligible to press and mark, which reads as
+    # "everyone defends" and is how a lone forward ends up tracking back into
+    # its own box. Measured in a 1-4 defeat: the ball was in our half 81% of the
+    # match and our most advanced player's median x was +0.41 - the halfway line
+    # - while the opponent's most advanced sat at -0.93, inside our half. With
+    # nobody ahead of the ball there is no outlet, so possession went back to
+    # the keeper (38 GK_DISTRIBUTE in one match, 44% of its ticks), got hoofed,
+    # and came straight back.
+    #
+    # AGENT_PROTOCOL.md section 6.4 says the same thing for the forward: press
+    # when "they've got it in their own half - win it high", and otherwise
+    # "hold your width and wait". So the forward joins the defensive pool only
+    # when the ball is in the opponent's half.
+    #
+    # The single-presser invariant still holds: the forward is only excluded
+    # while somebody else can do the job.
+    outfield = [me] + [m for m in obs["teammates"] if m["role"] != "GK"]
+    ball_in_our_half = ball[0] < obs["pitch"]["length"] / 2.0
+    defenders = [d for d in outfield
+                 if not (ball_in_our_half and d["role"] == "FORWARD")]
+    if not defenders:
+        defenders = outfield
     presser = min(defenders, key=lambda d: (_dist(d["position"], ball), d["id"]))
 
     remaining = [d for d in defenders if d["id"] != presser["id"]]
@@ -506,7 +550,15 @@ class Policy:
         mine = _dist(me["position"], landing)
         others = [_dist(m["position"], landing) for m in obs["teammates"] if m["role"] != "GK"]
         airborne = obs["ball"].get("height", 0.0) > self.p.intercept_max_height
-        if (not others or mine <= min(others) + 0.3) and not airborne:
+        # The same rule as defensive_assignment: a lone striker does not chase
+        # loose balls into its own half. Excluding the forward from marking was
+        # not enough on its own - measured in the 09:16 win, the forward still
+        # spent 52% of its ticks defending, and INTERCEPT from HERE was the
+        # single largest slice. A striker that sprints 6 units back for a 50-50
+        # is a striker who is not there for the next counter.
+        chases = not (me["role"] == "FORWARD"
+                      and landing[0] < obs["pitch"]["length"] / 2.0)
+        if chases and (not others or mine <= min(others) + 0.3) and not airborne:
             return AgentCommand(
                 type="INTERCEPT", aggressive=self.p.intercept_aggressive,
                 rationale="closest to the drop",
