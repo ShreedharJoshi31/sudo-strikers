@@ -106,13 +106,23 @@ class Params:
     #:
     #: Derived from the measured shape - GK 0.7u, DEF 3.5u, MID 6.2u, FWD 9.8u -
     #: with roughly +/-3u of freedom around each station.
-    zone_gk: tuple[float, float] = (0.0, 18.0)
-    zone_defender: tuple[float, float] = (4.0, 60.0)
-    zone_midfielder: tuple[float, float] = (20.0, 92.0)
-    zone_forward: tuple[float, float] = (44.0, 108.0)
+    #: MEASURED and retightened. The first cut overlapped DEF (4-60) and MID
+    #: (20-92) by 40 m, and the lines duly collapsed: both sat a median 3.09u
+    #: and 3.11u from the ball - indistinguishable, i.e. two players doing one
+    #: job. These bands overlap by ~12 m, enough to cover for each other and
+    #: not enough to occupy the same ground.
+    zone_gk: tuple[float, float] = (0.0, 16.0)
+    zone_defender: tuple[float, float] = (8.0, 48.0)
+    zone_midfielder: tuple[float, float] = (36.0, 76.0)
+    zone_forward: tuple[float, float] = (60.0, 108.0)
     #: Forwards own a side each (section 6.4: two strikers in one channel is
     #: "one striker and a spectator"). Shirt 3 takes the low-y half, 4 the high.
-    forward_channel_slack: float = 6.0
+    #:
+    #: This is a MINIMUM offset from the centre line, not a soft boundary. With
+    #: a soft one the support run pulled both strikers back toward the ball's y
+    #: and the whole team occupied 2.11u of the 7.2u width - a flat team is one
+    #: an opponent can defend with two players.
+    forward_channel_offset: float = 13.6   # = Bonkers United's measured +/-1.70u
 
     # --- support shape
     fwd_push: float = 22.0                # was 8.0
@@ -246,9 +256,9 @@ def hold_zone(me: dict, x: float, y: float, pitch: dict, p: Params) -> tuple[flo
         # hand the opposition half the pitch.
         mid = pitch["width"] / 2.0
         if me.get("number", 4) == 3:                 # left channel
-            y = min(y, mid + p.forward_channel_slack)
+            y = min(y, mid - p.forward_channel_offset)
         else:                                        # right channel
-            y = max(y, mid - p.forward_channel_slack)
+            y = max(y, mid + p.forward_channel_offset)
     return x, y
 
 
