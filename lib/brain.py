@@ -113,6 +113,17 @@ USE_ANALYSIS = _flag("AFC_ANALYSIS")
 USE_MEMORY = _flag("AFC_MEMORY")
 USE_SCOUTING = _flag("AFC_SCOUTING")
 
+#: Send the full per-player dicts for the other nine players to the model.
+#: OFF by default. Measured, they were 63% of the per-tick body and cut total
+#: input from ~2360 to ~1656 tokens when removed - and `analysis` already
+#: digests exactly those players into the answers the model is being asked for:
+#: pass options with interception margins, shot quality, the defensive
+#: assignment, and `valid_targets`, the ids it may legally name. Sending the
+#: roster on top asks a small model to redo geometry that Python did exactly in
+#: 0.3ms, in the one place where it is expensive.
+#: Set AFC_RAW_ROSTER=1 to put it back and A/B it.
+SEND_RAW_ROSTER = _flag("AFC_RAW_ROSTER", "0")
+
 
 @dataclass
 class PlayerSpec:
@@ -255,6 +266,14 @@ class Squad:
         if the model ignores them it still has everything it had before.
         """
         payload = dict(obs)
+        if not SEND_RAW_ROSTER:
+            # The model keeps `you`, `ball`, `pitch` and `analysis`. What it
+            # loses is nine raw player dicts it would have had to do geometry on
+            # anyway. `analysis.valid_targets` still carries every id it may
+            # name, so nothing it can legally emit becomes unreachable - it just
+            # stops paying tokens to rediscover what was already computed.
+            payload.pop("opponents", None)
+            payload.pop("teammates", None)
         if USE_ANALYSIS:
             payload["analysis"] = analysis.analyse(
                 obs, self.params, policy_suggests=safe.type
