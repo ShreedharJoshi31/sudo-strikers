@@ -695,6 +695,26 @@ def test_guardrails_leave_good_commands_alone():
         print(f"  [ok] {cmd.type:12s} untouched")
     print()
 
+
+
+def test_prompt_never_names_a_withheld_command():
+    """The command menu is generated; the prose around it is not.
+
+    Twice now the prose has kept advertising a command that offered() stopped
+    handing out - CLEAR_OVERRIDE, then FOLLOW_PLAYER - so the model was told to
+    use something that was not on its list. Both times it cost decisions.
+    """
+    import prompts
+    from command import WITHHELD, offered
+    for role in ("GK", "DEFENDER", "MIDFIELDER", "FORWARD"):
+        text = prompts.build(role=role, number=1, tactics="t", role_prompt="r")
+        for cmd in WITHHELD:
+            assert cmd not in text, f"{role} prompt still names withheld command {cmd}"
+        for cmd in offered(role):
+            assert cmd in text, f"{role} prompt never mentions offered command {cmd}"
+        print(f"  [ok] {role:11s} names all {len(offered(role))} offered, none of {len(WITHHELD)} withheld")
+    print()
+
 if __name__ == "__main__":
     test_all_situations()
     test_gk_holds_the_angle()
@@ -725,4 +745,5 @@ if __name__ == "__main__":
     test_shoot_inside_their_box()
     test_challenge_the_carrier()
     test_guardrails_leave_good_commands_alone()
+    test_prompt_never_names_a_withheld_command()
     print("All local tests passed.")
