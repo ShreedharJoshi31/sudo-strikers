@@ -112,6 +112,35 @@ DEFAULT_MODELS: dict[str, str] = {r: _model_for_role(r) for r in ROLES}
 USE_ANALYSIS = _flag("AFC_ANALYSIS")
 USE_MEMORY = _flag("AFC_MEMORY")
 USE_SCOUTING = _flag("AFC_SCOUTING")
+#: Send COMPACT rosters instead of the full player records.
+#:
+#: Measured: the two rosters are 61% of the model's input (2,398 of 3,930
+#: chars), and most of each record is dead weight to a model - `home_position`
+#: is the opponent's formation slot, `team_code` is constant per list, `number`
+#: duplicates `id`, and wire.py itself flags `speed_hint` as not trustworthy.
+#: Worse, `analysis` has ALREADY reduced those rosters to the conclusions that
+#: matter (pass options with p_success, shot verdict, marking assignment), so
+#: the raw rows invite a small model to redo geometry it is bad at. Participants
+#: report exactly that failure - one model answered with the literal text
+#: "clamp(-5.2, -12, 12)" instead of a number.
+#:
+#: MEASURED, and it does NOT pay: on us.amazon.nova-2-lite the 30% token cut
+#: moved p50 by 8 ms (977 -> 969, inside noise) and LOST a command type
+#: (4 distinct -> 3). Latency here is model inference time, not prompt size.
+#: So this defaults OFF. Set AFC_LEAN_INPUT=1 to re-test it on another model.
+USE_LEAN_INPUT = _flag("AFC_LEAN_INPUT", "0")
+
+#: Fields worth keeping on a compact roster row. `pressure` and `stamina` are
+#: judgement inputs the analysis block does not repeat per player.
+LEAN_PLAYER_FIELDS = ("id", "role", "position", "velocity", "stamina", "pressure")
+
+
+def _lean(players: list[dict]) -> list[dict]:
+    """A roster row trimmed to what a model can actually act on."""
+    return [
+        {k: p[k] for k in LEAN_PLAYER_FIELDS if k in p}
+        for p in players
+    ]
 
 
 @dataclass
@@ -255,6 +284,9 @@ class Squad:
         if the model ignores them it still has everything it had before.
         """
         payload = dict(obs)
+        if USE_LEAN_INPUT:
+            payload["teammates"] = _lean(obs.get("teammates") or [])
+            payload["opponents"] = _lean(obs.get("opponents") or [])
         if USE_ANALYSIS:
             payload["analysis"] = analysis.analyse(
                 obs, self.params, policy_suggests=safe.type

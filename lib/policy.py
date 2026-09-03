@@ -55,6 +55,14 @@ class Params:
     shoot_mid_lane: float = 5.50          # was 2.0
     shoot_far_dist: float = 63.25         # was 23.0
     shoot_far_lane: float = 9.90          # was 3.6
+    #: Widest angle off the goal's centre line still worth shooting from, in
+    #: degrees. The goal mouth is only 10 m wide on a 70 m pitch, so past this
+    #: there is almost no target left: the ball crosses the face and is a
+    #: turnover, not a shot. Participants measured 27 SHOOT commands producing
+    #: ZERO recorded shots because they gated on distance alone - a striker
+    #: parked wide reads as "in range" on any distance-only check, including a
+    #: Euclidean one. 45 degrees is roughly the corner of the box.
+    shoot_max_angle: float = 45.0
     tired_shoot_penalty: float = 5.50     # was 2.0; shrink near-range when stamina is low
     tired_stamina: float = 45.0           # stamina units, not a distance - unscaled
 
@@ -70,6 +78,14 @@ class Params:
     pass_dist_w: float = 0.28
     pass_goal_w: float = 0.20
     pass_goal_ref: float = 55.0           # was a hardcoded 20.0 inside the scorer
+    #: Pressure above which we stop asking "is this a good pass?" and play the
+    #: safest one regardless.
+    #:
+    #: MEASURED and left alone: on 393 replayed real on-ball ticks, sweeping
+    #: this over 0.25 / 0.50 / 0.80 produced a BYTE-IDENTICAL command mix. The
+    #: squeezed branch is not what drives our passing - `_best_pass` returning
+    #: an option above `pass_min_success` is. If PASS share needs to come down,
+    #: raise `pass_min_success` or bias `_best_pass`; changing this does nothing.
     pass_when_pressed: float = 0.25       # pressure units - unscaled
     pass_score_floor: float = 3.30        # was 1.2; scores scale with the distances
     pass_min_success: float = 0.45        # play it if the model says it likely arrives
@@ -115,7 +131,11 @@ class Params:
     #: overhead looks like a loose ball at your feet and the whole team chases
     #: something it cannot reach. A standing player wins the ball a little above
     #: head height; 2.5 m is that, and it is a Param so it can be swept.
-    intercept_max_height: float = 2.5
+    #: Measured ball height in real matches spans 0.139-0.986 platform units
+    #: (x8 = 1.1-7.9 m), with 0.143 the resting radius. Gate high enough that
+    #: only a genuinely airborne ball is skipped - suppressing a legitimate
+    #: claim costs more than one wasted chase.
+    intercept_max_height: float = 4.0
     #: If we are about to repeat the same holding run AND an opponent is inside
     #: this range, press instead. "Command diversity is the single biggest
     #: lever" (organisers), and a repeated MOVE_TO to a spot we already occupy
@@ -298,7 +318,14 @@ class Policy:
         if me["stamina"] <= p.tired_stamina:
             near -= p.tired_shoot_penalty
 
-        if (
+        # How far off the goal's centre line we are standing. Distance alone is
+        # not range: (50, 25) is 25 m from goal and 79 degrees off it, which is
+        # a cross, not a chance.
+        goal_angle = abs(math.degrees(math.atan2(
+            abs(pos[1] - goal[1]), max(0.1, abs(goal[0] - pos[0])))))
+        in_view = goal_angle <= p.shoot_max_angle
+
+        if in_view and (
             (d_goal < near and lane > p.shoot_near_lane)
             or (d_goal < p.shoot_mid_dist and lane > p.shoot_mid_lane)
             or (d_goal < p.shoot_far_dist and lane > p.shoot_far_lane)

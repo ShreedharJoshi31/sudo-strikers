@@ -58,17 +58,55 @@ from command import (
 
 # --------------------------------------------------------------- geometry
 
-# The real field, from the workshop docs. Origin is the centre spot.
-PLATFORM_X_LIMIT = 55.0        # x in [-55, +55]; goals sit on x = +/- 55
-PLATFORM_Y_LIMIT = 35.0        # y in [-35, +35]
-GOAL_HALF_WIDTH = 5.0          # the goal mouth spans y in [-5, +5]
+# THE PLATFORM DOES NOT USE METRES, AND ITS BALL DOES NOT USE THE PLAYERS' AXES.
+#
+# The workshop docs describe a 110 x 70 m field with x in [-55, +55]. The LIVE
+# match payload does not look like that at all. Measured over 386 real match
+# ticks (3,860 player samples) on 2026-09-03:
+#
+#     player.x   min  -6.470   median  -1.414   max   6.400
+#     player.y   min  -3.500   median   0.000   max   3.559
+#     ball.x     min  -6.978   median  -1.200   max   6.816
+#     ball.y     min   0.139   median   0.143   max   0.986   <- HEIGHT
+#     ball.z     min  -1.618   median   0.000   max   3.579   <- LATERAL
+#
+# Two separate bugs fell out of taking the docs at face value:
+#
+#  1. SCALE. The pitch is about +/-6.9 by +/-3.6 platform units, not +/-55 by
+#     +/-35. Treating units as metres put the opponent goal roughly 48 "metres"
+#     beyond where it really is, so every distance gate in policy.py was ~8x out.
+#     Consequence, measured: SHOOT was chosen 0 times in 373 on-ball ticks, the
+#     forward was ordered to x=23 (off the pitch) and pinned on the goal line by
+#     the platform's clamp, and PRESSURE_RADIUS=8 covered the entire field so
+#     every player read as permanently under maximum pressure.
+#
+#  2. BALL AXES. For PLAYERS, y is lateral. For the BALL, y is HEIGHT and z is
+#     lateral - note ball.y sits at 0.143 (the resting radius) in most ticks
+#     while ball.z spans the same range as player.y. Reading ball.y as lateral
+#     meant the ball's across-pitch position was invisible: the keeper computed
+#     the identical hold-the-angle target to 14 decimal places on 75 ticks.
+#
+# The fix keeps policy.py and every Params threshold in metres by scaling at
+# this boundary, which is the only place that knows about platform units.
+# Override from the environment if the organisers change the field.
+
+#: Half-extent of the real pitch, in PLATFORM units.
+PLATFORM_X_LIMIT = float(os.environ.get("AFC_PLATFORM_X_LIMIT", "6.9"))
+PLATFORM_Y_LIMIT = float(os.environ.get("AFC_PLATFORM_Y_LIMIT", "3.6"))
+
+#: Metres per platform unit. Uniform on both axes, so distances and angles stay
+#: true; it only sets what "one metre" means to the thresholds. 8.0 keeps the
+#: pitch about 110 m long, which is the scale Params was written against.
+PLATFORM_SCALE = float(os.environ.get("AFC_PLATFORM_SCALE", "8.0"))
+
+GOAL_HALF_WIDTH = 5.0          # the goal mouth, in metres, in the local frame
 
 # The normalised frame handed to policy.py: own goal at x=0, attacking toward
 # +x, y increasing across the pitch. Same pitch, shifted so both teams can run
 # identical code. policy.py's `_cx`/`_cy` clamp to [0, length] / [0, width],
 # which is why this frame starts at zero rather than staying centred.
-PITCH_LENGTH = PLATFORM_X_LIMIT * 2.0     # 110.0
-PITCH_WIDTH = PLATFORM_Y_LIMIT * 2.0      # 70.0
+PITCH_LENGTH = PLATFORM_X_LIMIT * 2.0 * PLATFORM_SCALE   # ~110.4 m
+PITCH_WIDTH = PLATFORM_Y_LIMIT * 2.0 * PLATFORM_SCALE    # ~57.6 m
 GOAL_WIDTH = GOAL_HALF_WIDTH * 2.0        # 10.0
 HALF_LENGTH = PITCH_LENGTH / 2.0          # 55.0, the x offset between frames
 HALF_WIDTH = PITCH_WIDTH / 2.0            # 35.0, the y offset, and the centre line
@@ -198,16 +236,18 @@ class Frame:
 
     # Points carry the translation; vectors do not.
     def to_local(self, x: float, y: float) -> tuple[float, float]:
-        return (self.sign * x + HALF_LENGTH, self.sign * y + HALF_WIDTH)
+        return (self.sign * x * PLATFORM_SCALE + HALF_LENGTH,
+                self.sign * y * PLATFORM_SCALE + HALF_WIDTH)
 
     def to_platform(self, x: float, y: float) -> tuple[float, float]:
-        return (self.sign * (x - HALF_LENGTH), self.sign * (y - HALF_WIDTH))
+        return (self.sign * (x - HALF_LENGTH) / PLATFORM_SCALE,
+                self.sign * (y - HALF_WIDTH) / PLATFORM_SCALE)
 
     def vector_to_local(self, vx: float, vy: float) -> tuple[float, float]:
-        return (self.sign * vx, self.sign * vy)
+        return (self.sign * vx * PLATFORM_SCALE, self.sign * vy * PLATFORM_SCALE)
 
     def vector_to_platform(self, vx: float, vy: float) -> tuple[float, float]:
-        return (self.sign * vx, self.sign * vy)
+        return (self.sign * vx / PLATFORM_SCALE, self.sign * vy / PLATFORM_SCALE)
 
     def heading_to_local(self, degrees: float) -> float:
         """Rotate an orientation into the local frame. AWAY is flipped 180."""
@@ -440,8 +480,17 @@ def to_observation(
     ball = state.get("ball") or {}
     ball_pos = ball.get("position") or {}
     ball_vel = ball.get("velocity") or {}
-    ball_xy = frame.to_local(float(ball_pos.get("x", 0.0)), float(ball_pos.get("y", 0.0)))
-    ball_v = frame.vector_to_local(float(ball_vel.get("x", 0.0)), float(ball_vel.get("y", 0.0)))
+    # The ball is 3D and does NOT share the players' axis order: when a `z` is
+    # present, `y` is HEIGHT and `z` is the across-pitch axis that `y` means for
+    # every player. Detect rather than assume, because the scrimmage/fitness
+    # fixtures send a flat 2D ball where `y` really is lateral.
+    ball_is_3d = ball_pos.get("z") is not None
+    ball_lat = float(ball_pos.get("z" if ball_is_3d else "y", 0.0) or 0.0)
+    ball_height = float(ball_pos.get("y", 0.0) or 0.0) if ball_is_3d else 0.0
+    ball_xy = frame.to_local(float(ball_pos.get("x", 0.0)), ball_lat)
+    ball_v = frame.vector_to_local(
+        float(ball_vel.get("x", 0.0) or 0.0),
+        float(ball_vel.get("z" if ball_is_3d else "y", 0.0) or 0.0))
 
     possession = _resolve_possession(
         mine + theirs,
@@ -470,11 +519,11 @@ def to_observation(
         "ball": {
             "position": ball_xy,
             "velocity": ball_v,
-            # Height above the turf, in metres. The platform plays in 3D and
-            # sends position.z; every distance check in policy.py is 2D, so
-            # without this a ball sailing 4 m overhead reads as "at my feet".
-            # Absent -> 0.0, which is exactly the old behaviour.
-            "height": float((ball.get("position") or {}).get("z", 0.0) or 0.0),
+            # Height above the turf, in local-frame metres. Every distance
+            # check in policy.py is 2D, so without this a ball sailing
+            # overhead reads as "at my feet". A 2D ball reports 0.0, which is
+            # exactly the pre-3D behaviour.
+            "height": ball_height * PLATFORM_SCALE,
             "owner_id": possession.owner_id,
             "owner_inferred": possession.inferred,
             "is_free": bool(ball.get("isFree", False)),

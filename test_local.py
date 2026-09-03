@@ -585,17 +585,19 @@ def _loose_ball_payload(height, prev_target=None, my_index=4):
     played last tick comes back as `previousCommand`.
     """
     import json as _json
+    # REAL platform units: the pitch is about +/-6.9 by +/-3.6, and the ball
+    # carries y=HEIGHT / z=LATERAL while players carry y=lateral.
     players = []
-    for code, bx in (("home", -20.0), ("away", 20.0)):
+    for code, bx in (("home", -2.5), ("away", 2.5)):
         for i in range(5):
             players.append({"teamCode": code, "agentId": f"agentId_{i}",
-                "position": {"x": bx + (i * 6 if code == "home" else -i * 6),
-                             "y": -10.0 + i * 5},
-                "velocity": {"x": 0.0, "y": 0.0}, "stamina": 90.0,
+                "position": {"x": bx + (i * 0.7 if code == "home" else -i * 0.7),
+                             "y": -1.2 + i * 0.6},
+                "velocity": {"x": 0.0, "y": 0.0}, "stamina": 0.9,
                 "isSprinting": False})
     inner = {"gameState": {"tick": 9, "gameTime": 30.0,
         "score": {"home": 0, "away": 0},
-        "ball": {"position": {"x": 6.0, "y": 2.0, "z": height},
+        "ball": {"position": {"x": 0.75, "y": height, "z": 0.25},
                  "velocity": {"x": 0.0, "y": 0.0}, "isFree": True},
         "players": players}, "teamId": 0, "myPlayers": [my_index]}
     if prev_target is not None:
@@ -616,13 +618,13 @@ def test_airborne_ball_is_not_chased():
                                      default_index=4, session_id="s-pos4")
         return sq.handle(canon, my_index=4)[0]
 
-    ground = play(0.2)
+    ground = play(0.14)   # resting on the turf
     assert ground["commandType"] == "INTERCEPT", f"ground ball -> {ground['commandType']}"
-    print("  [ok] z=0.2 -> INTERCEPT")
+    print("  [ok] height 0.14 (resting) -> INTERCEPT")
 
-    air = play(6.0)
-    assert air["commandType"] != "INTERCEPT", "chased a ball 6m in the air"
-    print(f"  [ok] z=6.0 -> {air['commandType']} (not INTERCEPT)")
+    air = play(0.95)      # near the top of the observed range
+    assert air["commandType"] != "INTERCEPT", "chased a ball high in the air"
+    print(f"  [ok] height 0.95 (airborne) -> {air['commandType']} (not INTERCEPT)")
     print()
 
 
@@ -633,7 +635,7 @@ def test_repeated_run_becomes_a_press():
     sq = Squad(tactics="t", role_prompts={"FORWARD": "Attack the space."}, use_llm=False)
 
     def play(prev=None):
-        canon, _ = inbound.normalise(_loose_ball_payload(6.0, prev),
+        canon, _ = inbound.normalise(_loose_ball_payload(0.95, prev),
                                      default_index=4, session_id="s-pos4")
         return sq.handle(canon, my_index=4)[0]
 
@@ -650,6 +652,59 @@ def test_repeated_run_becomes_a_press():
     assert elsewhere["commandType"] == "MOVE_TO", \
         f"a DIFFERENT previous run should not trigger the press, got {elsewhere['commandType']}"
     print("  [ok] repeat -> PRESS_BALL; a different previous run -> MOVE_TO")
+    print()
+
+
+def test_no_shooting_from_impossible_angles():
+    """A wide position is a cross, not a chance.
+
+    Participants measured 27 SHOOT commands producing ZERO recorded shots
+    because their range check ignored the angle. A Euclidean distance is not
+    enough on its own: the goal mouth is 10 m wide on a 70 m pitch, so from
+    (50, 25) - only 25 m out - there is essentially no target left.
+    """
+    import json as _json, math as _math
+    import inbound
+    from brain import Squad
+
+    def decide(px, py):
+        # REAL platform units. Opponent goal line is x = +6.9; the ball is
+        # {x, y=height, z=lateral}, unlike the players' {x, y=lateral}.
+        players = []
+        for code in ("home", "away"):
+            for i in range(5):
+                if code == "home" and i == 4:
+                    x, y = px, py
+                elif code == "home":
+                    x, y = -5.0 + i * 0.6, -2.5 + i * 0.4
+                else:
+                    x, y = (6.4 if i == 0 else -2.5 + i * 0.5), 2.6 + i * 0.2
+                players.append({"teamCode": code, "agentId": f"agentId_{i}",
+                    "position": {"x": x, "y": y}, "velocity": {"x": 0, "y": 0},
+                    "orientation": 90, "stamina": 0.9, "currentAction": "IDLE",
+                    "lastAction": "NONE", "speed": 0, "isSprinting": False})
+        inner = {"gameState": {"tick": 5, "gameTime": 20, "playMode": "OPEN_PLAY",
+            "score": {"home": 0, "away": 0},
+            "ball": {"position": {"x": px, "y": 0.14, "z": py},
+                     "velocity": {"x": 0, "y": 0}, "isFree": False,
+                     "possessionAgentId": "agentId_4"}, "players": players},
+            "teamId": 0, "myPlayers": [4]}
+        canon, _ = inbound.normalise({"prompt": _json.dumps(inner)},
+                                     default_index=4, session_id="s-team0-pos4")
+        sq = Squad(tactics="t", role_prompts={"FORWARD": "p"}, use_llm=False)
+        return sq.handle(canon, my_index=4)[0]["commandType"]
+
+    print("=== no shooting from impossible angles ===")
+    for px, py in ((5.5, 0.0), (4.5, 0.0), (5.9, 0.4)):
+        got = decide(px, py)
+        assert got == "SHOOT", f"central ({px},{py}) should still shoot, got {got}"
+    print("  [ok] central positions still SHOOT")
+
+    for px, py in ((6.2, 3.0), (5.5, 3.2), (4.0, -3.2)):
+        ang = abs(_math.degrees(_math.atan2(abs(py), 6.9 - px)))
+        got = decide(px, py)
+        assert got != "SHOOT", f"shot from ({px},{py}) at {ang:.0f} deg off centre"
+    print("  [ok] wide positions no longer SHOOT (48-77 deg off centre)")
     print()
 
 
@@ -797,6 +852,7 @@ if __name__ == "__main__":
     test_agent_pin_beats_bad_routing()
     test_airborne_ball_is_not_chased()
     test_repeated_run_becomes_a_press()
+    test_no_shooting_from_impossible_angles()
     test_agents_share_one_lib()
     test_gk_stays_home()
     test_clear_our_own_box()
