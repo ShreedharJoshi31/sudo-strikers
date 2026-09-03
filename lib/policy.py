@@ -137,10 +137,18 @@ class Params:
     #: claim costs more than one wasted chase.
     intercept_max_height: float = 4.0
     #: If we are about to repeat the same holding run AND an opponent is inside
-    #: this range, press instead. "Command diversity is the single biggest
-    #: lever" (organisers), and a repeated MOVE_TO to a spot we already occupy
-    #: is the least valuable tick available.
-    repeat_press_range: float = 16.5
+    #: this range, do something else instead. "Command diversity is the single
+    #: biggest lever" (organisers), and a repeated MOVE_TO to a spot we already
+    #: occupy is the least valuable tick available.
+    #:
+    #: SWEPT on 3,783 replayed real ticks, closed-loop (our own previous command
+    #: fed back, as the platform does). Top-command share, with shot quality
+    #: identical at every setting (7 good / 1 bad):
+    #:      0.0 (off) 74.5%   8.0 71.7%   16.5 69.4%   25.0 62.4%   40.0 50.7%
+    #: The one documented WINNING team in this competition ran MOVE_TO at 61%,
+    #: so 25.0 lands on the only external benchmark available. 40.0 buys more
+    #: diversity but starts pulling players off their station for its own sake.
+    repeat_press_range: float = 25.0
     #: How close the previous target must be to count as "the same run".
     repeat_same_target: float = 3.0
     carry_sprint_stamina: float = 35.0    # carry at pace while there is gas left
@@ -421,13 +429,34 @@ class Policy:
         prev = obs.get("previous_command") or {}
         if prev.get("type") == "MOVE_TO" and prev.get("target") is not None:
             if _dist(prev["target"], target) < p.repeat_same_target:
-                near = [o for o in obs["opponents"]
-                        if _dist(o["position"], me["position"]) < p.repeat_press_range]
+                near = sorted(
+                    (o for o in obs["opponents"]
+                     if _dist(o["position"], me["position"]) < p.repeat_press_range),
+                    key=lambda o: _dist(o["position"], me["position"]))
                 if near:
+                    # WHICH different command depends on who has the ball.
+                    # Pressing indiscriminately is how a team empties its own
+                    # half: participants measured a 45% PRESS_BALL share
+                    # dragging every defender to the ball and losing 0-2. Only
+                    # the designated presser presses - the same single-presser
+                    # rule defensive_assignment() already enforces - and anyone
+                    # else picks up the nearest opponent instead, which is
+                    # useful, is not a repeat, and keeps the shape.
+                    is_presser = (
+                        obs["possession"] == "opponent"
+                        and defensive_assignment(obs)["presser"] == me["id"]
+                    )
+                    if is_presser:
+                        return AgentCommand(
+                            type="PRESS_BALL",
+                            intensity=p.press_intensity,
+                            rationale="already holding that run - press instead",
+                        )
                     return AgentCommand(
-                        type="PRESS_BALL",
-                        intensity=p.press_intensity,
-                        rationale="already holding that run - press instead",
+                        type="MARK",
+                        target_player_id=near[0]["id"],
+                        tightness="LOOSE",
+                        rationale="already holding that run - pick a man up",
                     )
 
         return AgentCommand(

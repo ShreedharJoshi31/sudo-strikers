@@ -645,13 +645,22 @@ def test_repeated_run_becomes_a_press():
     print(f"  [ok] first tick -> MOVE_TO {target[0]:.1f},{target[1]:.1f}")
 
     again = play(target)
-    assert again["commandType"] == "PRESS_BALL", \
-        f"repeat of the same run stayed {again['commandType']}"
+    # The gate must produce something OTHER than the run we already sent. Which
+    # command depends on who has the ball: only the designated presser presses,
+    # everyone else picks a man up, so a free ball yields MARK not PRESS_BALL.
+    assert again["commandType"] != "MOVE_TO", "repeat of the same run stayed MOVE_TO"
+    assert again["commandType"] in ("MARK", "PRESS_BALL"), \
+        f"unexpected diversity command {again['commandType']}"
+    # and it must NOT press when we are not the designated presser
+    assert again["commandType"] == "MARK", \
+        f"pressed on a free ball without being the presser: {again['commandType']}"
+
     # the guard must not fire when the previous run was somewhere else
     elsewhere = play((target[0] + 40.0, target[1]))
     assert elsewhere["commandType"] == "MOVE_TO", \
-        f"a DIFFERENT previous run should not trigger the press, got {elsewhere['commandType']}"
-    print("  [ok] repeat -> PRESS_BALL; a different previous run -> MOVE_TO")
+        f"a DIFFERENT previous run should not trigger the gate, got {elsewhere['commandType']}"
+    print(f"  [ok] repeat -> {again['commandType']} (not a press: we are not the presser)")
+    print("  [ok] a different previous run -> MOVE_TO")
     print()
 
 
