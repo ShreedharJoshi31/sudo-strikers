@@ -14,6 +14,7 @@ is the point of splitting them up.
 
 from __future__ import annotations
 
+import json
 import os
 
 from brain import DEFAULT_MODELS, Squad
@@ -51,10 +52,30 @@ def build(app, *, player_index: int, role: str, role_prompt: str,
     )
 
     @app.entrypoint
-    def invoke(payload: dict) -> list[dict]:
+    async def invoke(payload: dict, context=None):
         """The platform sends {"gameState": ..., "teamId": N, "myPlayers": [i]}
-        and expects a JSON ARRAY of commands back."""
-        return squad.handle(payload, my_index=player_index)
+        and expects a JSON ARRAY of commands back.
+
+        This YIELDS rather than returns, and that distinction is the whole
+        contract. Returning a list makes BedrockAgentCoreApp answer with
+        `application/json`; the platform reads the reply as an SSE stream and
+        takes the array off the last `data:` line, so a plain JSON body comes
+        back as NO_PARSE — the agent looks healthy, replies in time, and every
+        decision is thrown away. Yielding a JSON STRING is what produces the
+        `data:` framing it is looking for.
+
+        `context` is accepted and unused: the runtime passes one positional
+        argument in some versions and two in others, and a signature mismatch
+        here fails at invoke time, in production, on every tick.
+
+        Yield the LIST, not json.dumps(list). This toolkit version JSON-encodes
+        whatever is yielded, so yielding a string double-encodes it and the
+        data line arrives as `"[{...}]"` — a quoted string where the platform
+        expects an array, which still fails to parse. Verified against the live
+        runtime; the AWS sample's `yield json.dumps(...)` is for an older
+        toolkit that did not re-encode.
+        """
+        yield squad.handle(payload, my_index=player_index)
 
     # Printed at cold start so the deployed runtime's identity and model show up
     # in CloudWatch. Otherwise the only way to find out which model a position
