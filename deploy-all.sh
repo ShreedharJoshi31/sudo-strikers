@@ -99,7 +99,12 @@ echo "=========================================="
 # stop_stale_sessions.py.
 echo ""
 echo "Stopping stale platform sessions so this deploy actually takes effect..."
-if ! python3 "$SCRIPT_DIR/stop_stale_sessions.py" --minutes 120; then
+# Must be an interpreter whose botocore knows the `bedrock-agentcore` service.
+# The system python3 usually does NOT: it raises UnknownServiceError, which is
+# how this step silently did nothing the first time it ran.
+AFC_PY="$SCRIPT_DIR/.venv/bin/python"
+[ -x "$AFC_PY" ] || AFC_PY="python3"
+if ! "$AFC_PY" "$SCRIPT_DIR/stop_stale_sessions.py" --minutes 120; then
   echo "  WARNING: could not stop sessions - the platform may still be running"
   echo "           the previous build. Run stop_stale_sessions.py by hand."
 fi
