@@ -147,20 +147,36 @@ GK_INDEX = 0
 DEFAULT_ROLES: dict[int, str] = {
     0: "GK",
     1: "DEFENDER",
-    2: "DEFENDER",
-    3: "MIDFIELDER",
+    2: "MIDFIELDER",
+    3: "FORWARD",
     4: "FORWARD",
 }
 
+#: MEASURED FORMATION. Both the role map above and the slots below come from
+#: match data, not from the arena this code was written against.
+#:
+#: AGENT_PROTOCOL.md section 2 fixes roles BY SLOT - 0 GK, 1 defender,
+#: 2 midfielder, 3 forward-left, 4 forward-right - i.e. 1-1-2, not the 2-1-1
+#: this used to run. Measured, in "units from own goal" on a 13.8-unit pitch:
+#:
+#:   our 2-1-1 shape        -> ball in our half 60-91%, results 1-0/1-4/0-3
+#:   our 1-1-2 shape        -> ball in our half 11%, leading 1-0
+#:   Bonkers United (1-2-2) -> beat us 0-3, their attackers at 7.8u SPLIT WIDE
+#:
+#: The slots below sit between our best shape (forwards at 10.8-11.3u, which
+#: won territory but left them isolated) and Bonkers' more compact 7.8u. The
+#: y-split is copied from Bonkers and from section 6.4: "Two strikers in the
+#: same channel is one striker and a spectator" - in our best match BOTH our
+#: forwards sat at y about -1, on the same side of the pitch.
 #: Formation base positions, in the NORMALISED frame, so one table serves both
 #: teams. Spread across a 110 x 70 pitch: keeper just off his line, defenders
 #: split either side of centre, midfielder on the halfway line, forward high.
 DEFAULT_FORMATION: dict[int, tuple[float, float]] = {
-    0: (5.0, HALF_WIDTH),
-    1: (25.0, 21.0),
-    2: (25.0, 49.0),
-    3: (52.0, HALF_WIDTH),
-    4: (78.0, HALF_WIDTH),
+    0: (5.6, HALF_WIDTH),            # keeper, 0.7u off its own line
+    1: (28.0, HALF_WIDTH),           # lone centre-back, 3.5u
+    2: (49.6, HALF_WIDTH),           # midfielder links the lines, 6.2u
+    3: (78.4, HALF_WIDTH - 13.6),    # forward LEFT  channel, 9.8u
+    4: (78.4, HALF_WIDTH + 13.6),    # forward RIGHT channel, 9.8u
 }
 
 #: Radius over which an opponent counts as applying pressure, and the distance
@@ -472,8 +488,12 @@ def to_observation(
         )
         (mine if is_mine else theirs).append(record)
 
+    forwards = [p for p in mine if p["role"] == "FORWARD"]
     for player in mine:
         player["pressure"] = _pressure(player["position"], theirs, pressure_radius)
+        # Does this striker have a partner to share the width with?
+        player["partner_forward"] = (
+            player["role"] == "FORWARD" and len(forwards) > 1)
     for player in theirs:
         player["pressure"] = _pressure(player["position"], mine, pressure_radius)
 

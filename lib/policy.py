@@ -98,6 +98,22 @@ class Params:
     # --- defending
     tackle_range: float = 6.05            # was 2.2
 
+    #: ZONE DISCIPLINE. Per-role x band, in metres from our own goal on a
+    #: 110.4 m (13.8 unit) pitch. Every match we lost, we lost by converging on
+    #: the ball: with the policy off, three players pressed at 79-84% and the
+    #: keeper left its line on 49% of ticks. Bands are wide enough to play in
+    #: and narrow enough that nobody ends up doing someone else's job.
+    #:
+    #: Derived from the measured shape - GK 0.7u, DEF 3.5u, MID 6.2u, FWD 9.8u -
+    #: with roughly +/-3u of freedom around each station.
+    zone_gk: tuple[float, float] = (0.0, 18.0)
+    zone_defender: tuple[float, float] = (4.0, 60.0)
+    zone_midfielder: tuple[float, float] = (20.0, 92.0)
+    zone_forward: tuple[float, float] = (44.0, 108.0)
+    #: Forwards own a side each (section 6.4: two strikers in one channel is
+    #: "one striker and a spectator"). Shirt 3 takes the low-y half, 4 the high.
+    forward_channel_slack: float = 6.0
+
     # --- support shape
     fwd_push: float = 22.0                # was 8.0
     mid_push: float = -5.50               # was -2.0
@@ -206,6 +222,34 @@ def _lane(frm, to, opponents, ignore_ids=()) -> float:
             continue
         best = min(best, _point_to_segment(o["position"], frm, to))
     return best
+
+
+def zone_for(role: str, p: Params) -> tuple[float, float]:
+    """The x band this role is allowed to operate in, in local metres."""
+    return {"GK": p.zone_gk, "DEFENDER": p.zone_defender,
+            "MIDFIELDER": p.zone_midfielder}.get(role, p.zone_forward)
+
+
+def hold_zone(me: dict, x: float, y: float, pitch: dict, p: Params) -> tuple[float, float]:
+    """Clamp a target into this player's band, and a forward into its channel.
+
+    Applied to every position we ask for, so a chase or a support run cannot
+    quietly turn a forward into a third defender - which is exactly how we ended
+    up with our most advanced player on the halfway line while being pinned in
+    our own half for 81% of a match.
+    """
+    lo, hi = zone_for(me["role"], p)
+    x = max(lo, min(hi, x))
+    if me["role"] == "FORWARD" and me.get("partner_forward"):
+        # Only split channels when there IS a second striker to split with. A
+        # lone forward owns the whole width; pinning it to one side would just
+        # hand the opposition half the pitch.
+        mid = pitch["width"] / 2.0
+        if me.get("number", 4) == 3:                 # left channel
+            y = min(y, mid + p.forward_channel_slack)
+        else:                                        # right channel
+            y = max(y, mid - p.forward_channel_slack)
+    return x, y
 
 
 def _best_pass(obs: dict, under_pressure: bool):
@@ -462,6 +506,7 @@ class Policy:
         for m in obs["teammates"]:
             if abs(m["position"][1] - y) < 2.5 and abs(m["position"][0] - x) < 4.0:
                 y += p.spread_y if y < pitch["width"] / 2 else -p.spread_y
+        x, y = hold_zone(me, x, y, pitch, p)
         target = (_cx(x, pitch["length"]), _cy(y, pitch["width"]))
 
         # DIVERSITY GATE. If this is the same holding run we already sent, the
@@ -536,9 +581,10 @@ class Policy:
             )
 
         home = me.get("home_position", me["position"])
+        rx, ry = hold_zone(me, home[0] - 2.0, home[1], pitch, p)
         return AgentCommand(
             type="MOVE_TO",
-            target=(_cx(home[0] - 2.0, pitch["length"]), _cy(home[1], pitch["width"])),
+            target=(_cx(rx, pitch["length"]), _cy(ry, pitch["width"])),
             rationale="recover shape",
         )
 

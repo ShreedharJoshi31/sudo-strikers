@@ -39,6 +39,7 @@ from memory import SquadMemory
 from scouting import Scout
 import gateway as gateway_mod
 import guardrails
+import policy as policy_mod
 from policy import DEFAULT, Params, Policy
 
 
@@ -76,6 +77,28 @@ DEFAULT_REGION = os.environ.get("AFC_REGION") or os.environ.get("AWS_DEFAULT_REG
 #: expensive answer on the list. Rejecting them costs nothing - `decide` has
 #: already computed a valid policy command before the model was ever asked.
 SURRENDER_COMMANDS = frozenset({"CLEAR_OVERRIDE", "RESET"})
+
+#: What each role is allowed to play. The model may still choose freely inside
+#: this set; anything outside is rejected and the policy command stands.
+#:
+#: MEASURED, with the policy override switched off and nova-lite driving every
+#: player directly: the midfielder pressed on 84% of ticks, the second defender
+#: on 79%, and THE GOALKEEPER left its line to INTERCEPT on 49%. A keeper cannot
+#: be a presser and a lone striker cannot be a third centre-back, but nothing in
+#: a small model's output knows that - every Nova-tier model benchmarked today
+#: collapsed onto a single command and repeated it.
+#:
+#: This is the floor that makes "LLM on top of policy" safe: the model adds
+#: judgement, it cannot delete the shape.
+ROLE_COMMANDS: dict[str, frozenset[str]] = {
+    "GK": frozenset({"MOVE_TO", "INTERCEPT", "GK_DISTRIBUTE", "SET_STANCE"}),
+    "DEFENDER": frozenset({"MOVE_TO", "MARK", "PRESS_BALL", "INTERCEPT",
+                           "SLIDE_TACKLE", "PASS", "SET_STANCE"}),
+    "MIDFIELDER": frozenset({"MOVE_TO", "MARK", "PRESS_BALL", "INTERCEPT",
+                             "PASS", "SHOOT", "FOLLOW_PLAYER", "SET_STANCE"}),
+    "FORWARD": frozenset({"MOVE_TO", "PRESS_BALL", "INTERCEPT", "PASS",
+                          "SHOOT", "FOLLOW_PLAYER", "SET_STANCE"}),
+}
 
 
 #: The four roles a player can hold. Index 0 is always the keeper; the rest
@@ -488,6 +511,17 @@ class Squad:
         if cmd is None:
             self.stats.note_rejection("no command returned")
             return None
+        role = obs["you"]["role"]
+        allowed = ROLE_COMMANDS.get(role)
+        if allowed is not None and cmd.type not in allowed:
+            self.stats.note_rejection(f"{role} may not play {cmd.type}")
+            return None
+        if cmd.type == "MOVE_TO" and cmd.target is not None:
+            lo, hi = policy_mod.zone_for(role, self.params)
+            if not (lo - 1e-6) <= cmd.target[0] <= (hi + 1e-6):
+                self.stats.note_rejection(
+                    f"{role} target x={cmd.target[0]:.0f} outside zone {lo:.0f}-{hi:.0f}")
+                return None
         if cmd.type in SURRENDER_COMMANDS:
             # Well-formed, accepted by the platform, and self-harming. See
             # SURRENDER_COMMANDS. Treat exactly like a hallucination: keep the
