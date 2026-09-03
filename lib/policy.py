@@ -110,6 +110,19 @@ class Params:
     shoot_aim_spread: float = 4.4         # was 1.6 on the small pitch
     mark_tightness: str = "TIGHT"
     intercept_aggressive: bool = True
+    #: Highest ball (metres above the turf) still worth an INTERCEPT. Every
+    #: other distance check here is 2D, so without this gate a ball sailing
+    #: overhead looks like a loose ball at your feet and the whole team chases
+    #: something it cannot reach. A standing player wins the ball a little above
+    #: head height; 2.5 m is that, and it is a Param so it can be swept.
+    intercept_max_height: float = 2.5
+    #: If we are about to repeat the same holding run AND an opponent is inside
+    #: this range, press instead. "Command diversity is the single biggest
+    #: lever" (organisers), and a repeated MOVE_TO to a spot we already occupy
+    #: is the least valuable tick available.
+    repeat_press_range: float = 16.5
+    #: How close the previous target must be to count as "the same run".
+    repeat_same_target: float = 3.0
     carry_sprint_stamina: float = 35.0    # carry at pace while there is gas left
     support_sprint_stamina: float = 25.0
     through_ball_space: float = 16.5      # free space behind a receiver to play into
@@ -370,9 +383,29 @@ class Policy:
         for m in obs["teammates"]:
             if abs(m["position"][1] - y) < 2.5 and abs(m["position"][0] - x) < 4.0:
                 y += p.spread_y if y < pitch["width"] / 2 else -p.spread_y
+        target = (_cx(x, pitch["length"]), _cy(y, pitch["width"]))
+
+        # DIVERSITY GATE. If this is the same holding run we already sent, the
+        # run is still executing and re-sending it buys nothing. When an
+        # opponent is close enough to be worth disturbing, press instead: it is
+        # a different command, it is useful, and it is the lever the organisers
+        # say decides matches. Only fires on a REPEAT, so a first-time run and
+        # every on-ball decision are untouched.
+        prev = obs.get("previous_command") or {}
+        if prev.get("type") == "MOVE_TO" and prev.get("target") is not None:
+            if _dist(prev["target"], target) < p.repeat_same_target:
+                near = [o for o in obs["opponents"]
+                        if _dist(o["position"], me["position"]) < p.repeat_press_range]
+                if near:
+                    return AgentCommand(
+                        type="PRESS_BALL",
+                        intensity=p.press_intensity,
+                        rationale="already holding that run - press instead",
+                    )
+
         return AgentCommand(
             type="MOVE_TO",
-            target=(_cx(x, pitch["length"]), _cy(y, pitch["width"])),
+            target=target,
             sprint=me["stamina"] > p.support_sprint_stamina,
             rationale="offer an angle",
         )
@@ -416,7 +449,8 @@ class Policy:
         landing = (ball[0] + bv[0] * 0.6, ball[1] + bv[1] * 0.6)
         mine = _dist(me["position"], landing)
         others = [_dist(m["position"], landing) for m in obs["teammates"] if m["role"] != "GK"]
-        if not others or mine <= min(others) + 0.3:
+        airborne = obs["ball"].get("height", 0.0) > self.p.intercept_max_height
+        if (not others or mine <= min(others) + 0.3) and not airborne:
             return AgentCommand(
                 type="INTERCEPT", aggressive=self.p.intercept_aggressive,
                 rationale="closest to the drop",
@@ -457,7 +491,9 @@ class Policy:
         # sweeping the old dive range over 6-18 changed no result, because at a
         # ~2s decision interval a shot has already arrived. Positioning saves
         # goals; the angle-holding MOVE_TO below is the keeper's real work.
-        if _dist(pos, ball) < p.gk_claim_range and obs["possession"] != "opponent":
+        if (_dist(pos, ball) < p.gk_claim_range
+                and obs["ball"].get("height", 0.0) <= p.intercept_max_height
+                and obs["possession"] != "opponent"):
             return AgentCommand(
                 type="INTERCEPT", aggressive=p.intercept_aggressive, rationale="claim it"
             )

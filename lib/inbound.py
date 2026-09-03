@@ -323,9 +323,12 @@ def normalise(payload, default_index=None, session_id=""):
     if isinstance(state, Mapping) and _looks_like_players(_maybe_json(state.get("players"))) \
             and _get(payload, TEAM_KEYS) is not None:
         idx = _resolve_index(payload, state, default_index, session_id, notes)
-        return ({"gameState": state,
+        canon = {"gameState": state,
                  "teamId": _resolve_team(payload, state, notes),
-                 "myPlayers": [idx]}, notes or ["canonical payload"])
+                 "myPlayers": [idx]}
+        if isinstance(payload.get("previousCommand"), Mapping):
+            canon["previousCommand"] = payload["previousCommand"]
+        return canon, notes or ["canonical payload"]
 
     players, why = _find_players(payload)
     notes.append(why)
@@ -382,6 +385,18 @@ def normalise(payload, default_index=None, session_id=""):
         ball_out = {"position": {"x": bpos[0], "y": bpos[1]},
                     "velocity": {"x": (bvel or (0.0, 0.0))[0],
                                  "y": (bvel or (0.0, 0.0))[1]}}
+        # Ball HEIGHT. The platform sends position.z and the pitch is played in
+        # 3D: a ball 4 m in the air cannot be intercepted by a player on the
+        # ground, but every 2D check says it is right on top of them.
+        bz = None
+        raw_pos = ball.get("position") if isinstance(ball, Mapping) else None
+        if isinstance(raw_pos, Mapping) and raw_pos.get("z") is not None:
+            try:
+                bz = float(raw_pos["z"])
+            except (TypeError, ValueError):
+                bz = None
+        if bz is not None:
+            ball_out["position"]["z"] = bz
         holder = None
         for k in ("possessionAgentId", "possession_agent_id", "possession",
                   "owner", "heldBy", "held_by", "carrier", "ownerId"):
@@ -416,7 +431,19 @@ def normalise(payload, default_index=None, session_id=""):
         notes.append(f"WARNING: player {idx} not in {my_code} squad; using {fallback}")
         idx = fallback
 
-    return {"gameState": state_out, "teamId": team_id, "myPlayers": [idx]}, notes
+    out = {"gameState": state_out, "teamId": team_id, "myPlayers": [idx]}
+    # The platform tells us what we played last tick. Command diversity is the
+    # organisers' stated single biggest lever, and this is the only signal that
+    # makes repetition visible from a stateless per-tick observation.
+    prev = None
+    for node in _walk(payload):
+        cand = _get(node, ("previousCommand", "previous_command", "lastCommand"))
+        if isinstance(cand, Mapping) and cand.get("commandType"):
+            prev = cand
+            break
+    if prev is not None:
+        out["previousCommand"] = prev
+    return out, notes
 
 
 def _resolve_team(payload, state, notes):

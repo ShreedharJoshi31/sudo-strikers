@@ -361,6 +361,29 @@ def _player_record(
     }, stamina_scale
 
 
+def _previous_command(payload: Mapping, frame: "Frame") -> dict | None:
+    """`previousCommand` from the platform, normalised into the local frame.
+
+    Returned as {"type": str, "target": (x, y) | None}. The target is converted
+    with the same transform as everything else, so a caller can compare it to a
+    position it computed itself without knowing which way the team is kicking.
+    """
+    raw = payload.get("previousCommand") if isinstance(payload, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return None
+    kind = raw.get("commandType")
+    if not kind:
+        return None
+    params = raw.get("parameters") or {}
+    target = None
+    if isinstance(params, Mapping) and params.get("target_x") is not None:
+        try:
+            target = frame.to_local(float(params["target_x"]), float(params["target_y"]))
+        except (TypeError, ValueError, KeyError):
+            target = None
+    return {"type": str(kind), "target": target}
+
+
 def to_observation(
     payload: Mapping,
     *,
@@ -447,10 +470,18 @@ def to_observation(
         "ball": {
             "position": ball_xy,
             "velocity": ball_v,
+            # Height above the turf, in metres. The platform plays in 3D and
+            # sends position.z; every distance check in policy.py is 2D, so
+            # without this a ball sailing 4 m overhead reads as "at my feet".
+            # Absent -> 0.0, which is exactly the old behaviour.
+            "height": float((ball.get("position") or {}).get("z", 0.0) or 0.0),
             "owner_id": possession.owner_id,
             "owner_inferred": possession.inferred,
             "is_free": bool(ball.get("isFree", False)),
         },
+        # What we played last tick, with any target mapped into THIS team's
+        # frame so policy.py can compare it against its own coordinates.
+        "previous_command": _previous_command(payload, frame),
         "pitch": {
             "length": PITCH_LENGTH,
             "width": PITCH_WIDTH,

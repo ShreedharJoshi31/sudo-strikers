@@ -577,6 +577,82 @@ def test_agent_pin_beats_bad_routing():
     print(f"  [ok] all five ignored a mis-routed myPlayers\n")
 
 
+def _loose_ball_payload(height, prev_target=None, my_index=4):
+    """A loose ball, optionally in the air, optionally after an identical run.
+
+    Shaped like the REAL platform payload: the whole state arrives as a JSON
+    string under `prompt`, ball height lives in position.z, and the command we
+    played last tick comes back as `previousCommand`.
+    """
+    import json as _json
+    players = []
+    for code, bx in (("home", -20.0), ("away", 20.0)):
+        for i in range(5):
+            players.append({"teamCode": code, "agentId": f"agentId_{i}",
+                "position": {"x": bx + (i * 6 if code == "home" else -i * 6),
+                             "y": -10.0 + i * 5},
+                "velocity": {"x": 0.0, "y": 0.0}, "stamina": 90.0,
+                "isSprinting": False})
+    inner = {"gameState": {"tick": 9, "gameTime": 30.0,
+        "score": {"home": 0, "away": 0},
+        "ball": {"position": {"x": 6.0, "y": 2.0, "z": height},
+                 "velocity": {"x": 0.0, "y": 0.0}, "isFree": True},
+        "players": players}, "teamId": 0, "myPlayers": [my_index]}
+    if prev_target is not None:
+        inner["previousCommand"] = {"commandType": "MOVE_TO",
+            "parameters": {"target_x": prev_target[0], "target_y": prev_target[1],
+                           "sprint": True}}
+    return {"prompt": _json.dumps(inner)}
+
+
+def test_airborne_ball_is_not_chased():
+    print("=== a ball overhead is not a loose ball ===")
+    import inbound
+    from brain import Squad
+    sq = Squad(tactics="t", role_prompts={"FORWARD": "Attack the space."}, use_llm=False)
+
+    def play(height, prev=None):
+        canon, _ = inbound.normalise(_loose_ball_payload(height, prev),
+                                     default_index=4, session_id="s-pos4")
+        return sq.handle(canon, my_index=4)[0]
+
+    ground = play(0.2)
+    assert ground["commandType"] == "INTERCEPT", f"ground ball -> {ground['commandType']}"
+    print("  [ok] z=0.2 -> INTERCEPT")
+
+    air = play(6.0)
+    assert air["commandType"] != "INTERCEPT", "chased a ball 6m in the air"
+    print(f"  [ok] z=6.0 -> {air['commandType']} (not INTERCEPT)")
+    print()
+
+
+def test_repeated_run_becomes_a_press():
+    print("=== the same holding run twice becomes a press ===")
+    import inbound
+    from brain import Squad
+    sq = Squad(tactics="t", role_prompts={"FORWARD": "Attack the space."}, use_llm=False)
+
+    def play(prev=None):
+        canon, _ = inbound.normalise(_loose_ball_payload(6.0, prev),
+                                     default_index=4, session_id="s-pos4")
+        return sq.handle(canon, my_index=4)[0]
+
+    first = play()
+    assert first["commandType"] == "MOVE_TO", f"expected a holding run, got {first['commandType']}"
+    target = (first["parameters"]["target_x"], first["parameters"]["target_y"])
+    print(f"  [ok] first tick -> MOVE_TO {target[0]:.1f},{target[1]:.1f}")
+
+    again = play(target)
+    assert again["commandType"] == "PRESS_BALL", \
+        f"repeat of the same run stayed {again['commandType']}"
+    # the guard must not fire when the previous run was somewhere else
+    elsewhere = play((target[0] + 40.0, target[1]))
+    assert elsewhere["commandType"] == "MOVE_TO", \
+        f"a DIFFERENT previous run should not trigger the press, got {elsewhere['commandType']}"
+    print("  [ok] repeat -> PRESS_BALL; a different previous run -> MOVE_TO")
+    print()
+
+
 def test_agents_share_one_lib():
     print("=== agent files stay thin; logic lives in lib/ ===")
     import pathlib
@@ -719,6 +795,8 @@ if __name__ == "__main__":
     test_tool_handlers()
     test_agents_pin_their_player()
     test_agent_pin_beats_bad_routing()
+    test_airborne_ball_is_not_chased()
+    test_repeated_run_becomes_a_press()
     test_agents_share_one_lib()
     test_gk_stays_home()
     test_clear_our_own_box()
