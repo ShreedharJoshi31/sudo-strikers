@@ -44,10 +44,18 @@ echo ""
 
 # Two parallel indexed arrays, NOT an associative array: macOS ships bash 3.2,
 # where `declare -A` does not exist and fails at run time.
+# Staggered, not fired all at once. The first deploy into a cold account also
+# does one-time global setup - S3 staging bucket, CodeBuild role, observability
+# policies - and five processes racing that is how ai-def1 failed on the first
+# parallel run while the other four succeeded. A couple of seconds apart is
+# enough to let the first one win that race, and costs nothing against a deploy
+# that takes a minute.
+STAGGER="${AFC_DEPLOY_STAGGER:-3}"
 PIDS=()
 for agent in "${AGENTS[@]}"; do
   "$SCRIPT_DIR/deploy-one.sh" "$agent" &
   PIDS+=($!)
+  sleep "$STAGGER"
 done
 
 # Waited on individually rather than a bare `wait`, so a failure is attributed
@@ -56,6 +64,22 @@ DEPLOYED=(); FAILED=()
 for i in "${!AGENTS[@]}"; do
   if wait "${PIDS[$i]}"; then DEPLOYED+=("${AGENTS[$i]}"); else FAILED+=("${AGENTS[$i]}"); fi
 done
+
+# One retry, serially. A deploy that failed in a herd usually succeeds alone,
+# and a half-deployed squad is worse than a slow one: the platform would run
+# four new agents alongside one stale.
+if [ ${#FAILED[@]} -gt 0 ]; then
+  echo ""
+  echo "Retrying ${#FAILED[@]} failed agent(s) one at a time..."
+  RETRY=("${FAILED[@]}"); FAILED=()
+  for agent in "${RETRY[@]}"; do
+    if "$SCRIPT_DIR/deploy-one.sh" "$agent"; then
+      DEPLOYED+=("$agent")
+    else
+      FAILED+=("$agent")
+    fi
+  done
+fi
 
 echo ""
 echo "=========================================="

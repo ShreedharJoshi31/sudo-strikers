@@ -60,7 +60,7 @@ fi
 export AWS_ACCOUNT_ID
 
 # Only ever our own directory, never the shared parent.
-trap 'rm -rf "$STAGE"' EXIT
+trap 'rm -rf "$STAGE"' EXIT   # the .log sits beside it and is kept
 rm -rf "$STAGE"
 mkdir -p "$STAGE/src"
 
@@ -86,11 +86,19 @@ sed -e "s|\${AWS_ACCOUNT_ID}|$AWS_ACCOUNT_ID|g" \
     -e "s|\${AWS_DEFAULT_REGION}|$AWS_DEFAULT_REGION|g" \
     "$SRC/.bedrock_agentcore.yaml.template" > "$STAGE/.bedrock_agentcore.yaml"
 
-say "deploying..."
-if (cd "$STAGE" && agentcore deploy --auto-update-on-conflict) 2>&1 | sed "s/^/[$AGENT] /"; then
+# Every agent gets its own log file. Streaming five deploys straight to a
+# shared stdout lost one entirely during testing - it failed with no output at
+# all, which is unusable when the whole point of running in parallel is that
+# you cannot watch them. The file is written first and echoed second, so the
+# reason for a failure always survives even if the terminal output does not.
+LOG="$SCRIPT_DIR/_build/$AGENT.log"
+mkdir -p "$(dirname "$LOG")"
+say "deploying... (log: $LOG)"
+if (cd "$STAGE" && agentcore deploy --auto-update-on-conflict) > "$LOG" 2>&1; then
   say "OK"
   exit 0
 else
-  say "FAILED"
+  say "FAILED - last lines:"
+  tail -20 "$LOG" | sed "s/^/[$AGENT] /"
   exit 1
 fi
