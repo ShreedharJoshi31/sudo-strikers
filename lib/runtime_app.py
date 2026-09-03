@@ -14,7 +14,6 @@ is the point of splitting them up.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 
@@ -54,22 +53,33 @@ def build(app, *, player_index: int, role: str, role_prompt: str,
 
     @app.entrypoint
     async def invoke(payload: dict, context=None):
-        """One decision, in the exact shape the platform parses.
+        """The platform sends {"gameState": ..., "teamId": N, "myPlayers": [i]}
+        and expects a JSON ARRAY of commands back.
 
-        This MUST be a generator that yields a JSON STRING, not a function that
-        returns a list. The runtime replies over SSE and reads the commands off
-        the last `data:` line, so a returned object arrives as something it
-        cannot parse and the whole tick comes back as NO_PARSE - which looks
-        like a broken agent, not a formatting mistake.
+        This YIELDS rather than returns, and that distinction is the whole
+        contract. Returning a list makes BedrockAgentCoreApp answer with
+        `application/json`; the platform reads the reply as an SSE stream and
+        takes the array off the last `data:` line, so a plain JSON body comes
+        back as NO_PARSE - the agent looks healthy, replies in time, and every
+        decision is thrown away. Yielding is what produces the `data:` framing
+        it is looking for.
 
-        Nothing may be written to stdout from here on, for the same reason: any
+        Yield the LIST, not json.dumps(list). This toolkit version JSON-encodes
+        whatever is yielded, so yielding a string double-encodes it and the data
+        line arrives as `"[{...}]"` - a quoted string where the platform expects
+        an array, which still fails to parse. Verified against the live runtime;
+        the AWS sample's `yield json.dumps(...)` targets an older toolkit that
+        did not re-encode, so following it here reintroduces the bug.
+
+        Nothing may be written to stdout from here on, for the same reason: a
         stray print lands in the stream after the payload and corrupts it. The
         cold-start banner below goes to stderr, which CloudWatch still captures.
 
-        `context` is optional so the entrypoint stays callable from a test;
-        AgentCore passes it, local callers do not.
+        `context` is accepted and unused: the runtime passes one positional
+        argument in some versions and two in others, and a signature mismatch
+        here fails at invoke time, in production, on every tick.
         """
-        yield json.dumps(squad.handle(payload, my_index=player_index))
+        yield squad.handle(payload, my_index=player_index)
 
     # Printed at cold start so the deployed runtime's identity and model show up
     # in CloudWatch. Otherwise the only way to find out which model a position

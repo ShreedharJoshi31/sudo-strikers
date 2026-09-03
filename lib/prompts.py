@@ -21,7 +21,7 @@ re-derive geometry, which is the slow, error-prone part for a small model.
 
 from __future__ import annotations
 
-from command import DOCS, OUTFIELD
+from command import DOCS, offered
 
 _BASE = """You are the {role} (#{number}) in a 5-a-side Agentic Football Cup match.
 
@@ -111,7 +111,7 @@ def build(
     interval: float = 2.0,
     budget: float = 1.8,
 ) -> str:
-    allowed = DOCS.keys() if role == "GK" else OUTFIELD
+    allowed = offered(role)
     return _BASE.format(
         role=role,
         number=number,

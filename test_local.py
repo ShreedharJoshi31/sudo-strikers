@@ -549,38 +549,48 @@ def _load_agent(name: str):
     return m
 
 
-def test_entrypoint_yields_json_string():
-    """The exact contract the platform parses, and the one that broke.
+def test_entrypoint_yields_a_command_list():
+    """The exact contract the platform parses, and the one that broke twice.
 
-    A returned list comes back as something the runtime cannot read off the
-    SSE stream, and the platform reports NO_PARSE - which looks like a broken
-    agent rather than a formatting mistake. So: a generator, yielding a string,
-    that parses as a JSON array of commands.
+    Two ways to get this wrong, and both look like a healthy agent:
+
+      - RETURN a list  -> BedrockAgentCoreApp answers application/json, the
+        platform finds no `data:` line, and reports NO_PARSE.
+      - YIELD a STRING -> this toolkit version JSON-encodes whatever is
+        yielded, so the data line arrives as `"[{...}]"`, a quoted string where
+        an array is expected. Also NO_PARSE.
+
+    The narrow correct answer is to YIELD THE LIST and let the toolkit encode
+    it once. The `not isinstance(str)` assertion below is the one that catches a
+    well-meant `json.dumps` being added back - which is exactly what the AWS
+    sample does, because it targets an older toolkit that did not re-encode.
     """
-    print("=== entrypoint yields a parseable JSON string ===")
-    import asyncio, inspect, json as _json
+    print("=== entrypoint yields a command list (encoded once) ===")
+    import asyncio, inspect
 
     m = _load_agent("ai-gk")
     entry = m.app.entry
     assert entry is not None, "no entrypoint registered"
     assert inspect.isasyncgenfunction(entry) or inspect.isgeneratorfunction(entry), \
-        "entrypoint must be a generator that yields, not a function that returns"
+        "must be a generator that yields, not a function that returns"
 
-    payload = {"prompt": _json.dumps(_platform_payload(0))}
+    payload = {"prompt": json.dumps(_platform_payload(0))}
 
     async def drive():
         chunks = [c async for c in entry(payload, None)]
         assert chunks, "entrypoint yielded nothing"
         last = chunks[-1]
-        assert isinstance(last, str), f"must yield a str, got {type(last).__name__}"
-        cmds = _json.loads(last)
-        assert isinstance(cmds, list) and cmds, "must be a non-empty JSON array"
-        assert cmds[0]["commandType"] in VALID, cmds[0]
-        assert cmds[0]["playerId"] == 0, "GK runtime must answer as player 0"
+        assert not isinstance(last, str), (
+            "yielded a str - the toolkit will encode it again and the platform "
+            "will see a quoted string instead of an array"
+        )
+        assert isinstance(last, list) and last, f"must yield a non-empty list, got {last!r}"
+        assert last[0]["commandType"] in VALID, last[0]
+        assert last[0]["playerId"] == 0, "GK runtime must answer as player 0"
         return last
 
     got = asyncio.run(drive())
-    print(f"  [ok] yielded str -> {got[:70]}\n")
+    print(f"  [ok] yielded {type(got).__name__} -> {json.dumps(got)[:66]}\n")
 
 
 def test_agents_pin_their_player():
@@ -643,7 +653,7 @@ if __name__ == "__main__":
     test_squad_runs_without_gateway()
     test_tools_reach_the_agent()
     test_tool_handlers()
-    test_entrypoint_yields_json_string()
+    test_entrypoint_yields_a_command_list()
     test_agents_pin_their_player()
     test_agent_pin_beats_bad_routing()
     test_agents_share_one_lib()

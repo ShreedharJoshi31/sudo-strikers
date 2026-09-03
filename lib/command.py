@@ -72,6 +72,24 @@ STICKY: tuple[str, ...] = ("SET_STANCE", "CLEAR_OVERRIDE", "RESET")
 #: menu from this, so a keeper sees eleven options and everyone else sees ten.
 OUTFIELD: tuple[str, ...] = tuple(c for c in COMMAND_TYPES if c not in GK_ONLY)
 
+#: Recovery commands, deliberately NOT offered to the model.
+#:
+#: Measured with Nova Micro: offered CLEAR_OVERRIDE, the keeper chose it on
+#: 6 of 6 ticks and stopped positioning entirely. It takes no parameters, which
+#: makes it the cheapest thing for a small model to emit, and it reads as safe.
+#: It is not — it is sticky and does nothing, so the player stands on the last
+#: order while the game moves.
+#:
+#: These exist to recover from a bad team state, which is a judgement about the
+#: whole squad that a single player looking at one tick cannot make. The policy
+#: never emits them either.
+RECOVERY: tuple[str, ...] = ("CLEAR_OVERRIDE", "RESET")
+
+#: The menu actually shown to the model, per role.
+def offered(role: str) -> tuple[str, ...]:
+    allowed = COMMAND_TYPES if role == "GK" else OUTFIELD
+    return tuple(c for c in allowed if c not in RECOVERY)
+
 # SET_STANCE takes an int, not a name; these are the three legal values.
 STANCE_BALANCED = 0
 STANCE_ATTACKING = 1
