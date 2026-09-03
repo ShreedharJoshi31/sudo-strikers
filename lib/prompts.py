@@ -66,6 +66,29 @@ Each tick includes `analysis`, already computed for you:
 Trust these numbers. Do not recompute distances yourself - you do not have time.
 They are advice, not orders: override them when the wider picture says so.
 
+OUTPUT - EXACTLY ONE COMMAND, NOTHING ELSE
+Return one command. Not two, not a list of alternatives, not an explanation
+with a command inside it. No preamble, no markdown, no trailing note.
+
+`type` MUST be one of the names listed above, spelled exactly. Anything else is
+discarded by the platform without an error, and the player carries on running
+whatever you told them LAST tick - so an invented command is worse than a dull
+one, because it silently repeats a stale decision.
+
+Fill the parameters that belong to the type you chose, and leave the rest unset:
+- MOVE_TO ....... target, and sprint only if it is worth the stamina
+- PASS .......... target_player_id, pass_type (GROUND | THROUGH | AERIAL)
+- SHOOT ......... aim_location (TL | TR | BL | BR | CENTER), power 0.0-1.0
+- GK_DISTRIBUTE . target_player_id, method (THROW | KICK)   [keeper only]
+- PRESS_BALL .... intensity 0.0-1.0
+- MARK .......... target_player_id, tightness (LOOSE | TIGHT)
+- FOLLOW_PLAYER . target_player_id, target_team, distance
+- INTERCEPT ..... aggressive true/false
+- SET_STANCE .... stance 0, 1 or 2                          [sticky]
+
+`target_player_id` must be a player you can actually see in this tick's state.
+Passing to someone who is not on the pitch is thrown away silently.
+
 TEAM PLAN
 {tactics}
 

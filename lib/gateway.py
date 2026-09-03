@@ -57,6 +57,7 @@ class GatewayTools:
         self.url = url or GATEWAY_URL
         self.token = token or GATEWAY_TOKEN
         self._client = None
+        self._open = False
         self._tools: list = []
         self._tried = False
         self._error: str | None = None
@@ -85,10 +86,19 @@ class GatewayTools:
                 from strands.tools.mcp.mcp_client import MCPClient
 
                 client = MCPClient(self._transport)
-                # list_tools_sync must run inside the client context or the
-                # connection is not yet open when the call is made.
-                with client:
-                    tools = client.list_tools_sync()
+                # Opened ONCE and held for the life of the process.
+                #
+                # The obvious `with client: ...` here is a trap: it closes the
+                # connection again on the way out, so every later use pays a
+                # fresh thread spawn, TCP connect, TLS handshake and MCP
+                # initialize - on the decision path, on every single tick. That
+                # is worth roughly 100ms a decision and it is entirely wasted,
+                # because the tool list does not change during a match.
+                #
+                # A runtime is long-lived, so the connection should be too.
+                client.__enter__()
+                self._open = True
+                tools = client.list_tools_sync()
                 self._client = client
                 self._tools = list(tools)
             except Exception as exc:                     # noqa: BLE001
@@ -109,9 +119,19 @@ class GatewayTools:
     def error(self) -> str | None:
         return self._error
 
+    def close(self) -> None:
+        """Release the long-lived connection. Only for shutdown and tests."""
+        if self._open and self._client is not None:
+            try:
+                self._client.__exit__(None, None, None)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._open = False
+
     def status(self) -> dict:
         return {
             "configured": bool(self.url),
+            "open": self._open,
             "connected": bool(self._tools),
             "tool_count": len(self._tools),
             "tool_names": [getattr(t, "tool_name", getattr(t, "name", "?"))
@@ -138,5 +158,9 @@ def session(tools: GatewayTools | None):
     so `with gateway.session(...)` is safe on every path.
     """
     if tools is None or tools.client is None:
+        return _NullContext()
+    if getattr(tools, "_open", False):
+        # Already open and staying open - re-entering would just pay the
+        # handshake again. Nothing to wrap.
         return _NullContext()
     return tools.client

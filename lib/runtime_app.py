@@ -14,7 +14,9 @@ is the point of splitting them up.
 
 from __future__ import annotations
 
+import json
 import os
+import sys
 
 from brain import DEFAULT_MODELS, Squad
 
@@ -51,10 +53,23 @@ def build(app, *, player_index: int, role: str, role_prompt: str,
     )
 
     @app.entrypoint
-    def invoke(payload: dict) -> list[dict]:
-        """The platform sends {"gameState": ..., "teamId": N, "myPlayers": [i]}
-        and expects a JSON ARRAY of commands back."""
-        return squad.handle(payload, my_index=player_index)
+    async def invoke(payload: dict, context=None):
+        """One decision, in the exact shape the platform parses.
+
+        This MUST be a generator that yields a JSON STRING, not a function that
+        returns a list. The runtime replies over SSE and reads the commands off
+        the last `data:` line, so a returned object arrives as something it
+        cannot parse and the whole tick comes back as NO_PARSE - which looks
+        like a broken agent, not a formatting mistake.
+
+        Nothing may be written to stdout from here on, for the same reason: any
+        stray print lands in the stream after the payload and corrupts it. The
+        cold-start banner below goes to stderr, which CloudWatch still captures.
+
+        `context` is optional so the entrypoint stays callable from a test;
+        AgentCore passes it, local callers do not.
+        """
+        yield json.dumps(squad.handle(payload, my_index=player_index))
 
     # Printed at cold start so the deployed runtime's identity and model show up
     # in CloudWatch. Otherwise the only way to find out which model a position
@@ -62,6 +77,7 @@ def build(app, *, player_index: int, role: str, role_prompt: str,
     print(
         f"[afc] player={player_index} role={role} llm={enabled} "
         f"model={DEFAULT_MODELS.get(role)}",
+        file=sys.stderr,          # never stdout: stdout is the response stream
         flush=True,
     )
     return squad

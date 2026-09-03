@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -95,6 +96,56 @@ DEFAULT_MODELS: dict[str, str] = {r: _model_for_role(r) for r in ROLES}
 USE_ANALYSIS = _flag("AFC_ANALYSIS")
 USE_MEMORY = _flag("AFC_MEMORY")
 USE_SCOUTING = _flag("AFC_SCOUTING")
+LOG_DECISIONS = _flag("AFC_LOG")
+
+
+def log(event: str, **fields) -> None:
+    """One structured line per event, to STDERR.
+
+    Never stdout. On AgentCore stdout is the SSE response stream, so a stray
+    print lands after the payload and the platform reports NO_PARSE - an agent
+    that looks broken because of a log line.
+
+    The shape is `key=value`, which CloudWatch Logs Insights can parse directly:
+
+        fields @timestamp, tick, player, cmd, src, ms
+        | filter event = "decision" and src = "policy"
+        | stats count() by cmd
+
+        filter event = "reject" | stats count() by reason
+    """
+    if not LOG_DECISIONS:
+        return
+    parts = " ".join(
+        f"{k}={str(v).replace(chr(10), ' ')[:60]}" for k, v in fields.items()
+    )
+    print(f"[afc] event={event} {parts}", file=sys.stderr, flush=True)
+
+
+def _unwrap(payload: dict) -> dict:
+    """Return the object carrying gameState, whatever envelope it arrived in.
+
+    AgentCore does not hand the entrypoint the game state directly: it nests it
+    under "prompt", and that value may be a JSON STRING rather than an object.
+    That is how the official sample agents read it. Building only to the
+    documented flat shape produces an agent that finds no gameState and quietly
+    plays a fallback on every tick - no error, just a team that does nothing.
+
+    Both shapes are accepted because the flat form is what the docs describe and
+    what every local test uses, and being strict here buys nothing: a wrong
+    guess costs every decision in the match.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if "gameState" in payload:
+        return payload
+    inner = payload.get("prompt")
+    if isinstance(inner, str):
+        try:
+            inner = json.loads(inner)
+        except (ValueError, TypeError):
+            return payload
+    return inner if isinstance(inner, dict) else payload
 
 
 @dataclass
@@ -180,6 +231,7 @@ class Squad:
         self.stats = Stats()
         # Built even when no Gateway is configured; it is inert until loaded.
         self.gateway = gateway_mod.GatewayTools()
+        self._prev_llm_used = 0
         self._agents: dict[str, object] = {}
         self._pool: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(max_workers=5) if use_llm else None
@@ -327,6 +379,7 @@ class Squad:
         current, it is valid, and repeating it is harmless.
         """
         try:
+            payload = _unwrap(payload)
             state = payload.get("gameState")
             if not isinstance(state, dict):
                 raise ValueError("payload has no gameState")
@@ -356,10 +409,23 @@ class Squad:
                 # The policy produced something the platform would drop. That is
                 # a bug in us, not in the model, so make it loud in the stats.
                 self.stats.note_rejection(f"policy: {reason}")
+                log("reject", tick=obs.get("tick"), player=my_index,
+                    cmd=cmd.type, reason=reason)
                 cmd = SAFE_DEFAULT
-            return wire.to_wire(cmd, wire.frame_for(payload), my_index)
+
+            out = wire.to_wire(cmd, wire.frame_for(payload), my_index)
+            st = self.stats
+            log("decision",
+                tick=obs.get("tick"), player=my_index, role=obs["you"]["role"],
+                cmd=cmd.type,
+                src="llm" if st.llm_used > self._prev_llm_used else "policy",
+                ms=round(st.latencies[-1] * 1000, 2) if st.latencies else 0.0,
+                late=st.llm_late, err=st.llm_error, why=cmd.rationale)
+            self._prev_llm_used = st.llm_used
+            return out
         except Exception as exc:  # noqa: BLE001 - a raise here costs the tick
             self.stats.note_rejection(f"handle: {type(exc).__name__}: {exc}"[:80])
+            log("error", player=my_index, kind=type(exc).__name__, detail=str(exc))
             try:
                 idx = my_index
                 if idx is None:

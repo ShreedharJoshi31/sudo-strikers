@@ -504,8 +504,41 @@ def _platform_payload(my_index: int, team: str = "home") -> dict:
     }
 
 
+def _stub_agentcore():
+    """Stand in for bedrock_agentcore so agent modules import without AWS.
+
+    The agent files are thin - they pick a player, a role and a brief, then
+    hand off to runtime_app.build. That wiring is exactly what is worth
+    testing, and requiring the AWS SDK to test it would mean it never gets
+    tested locally at all. Captures the registered entrypoint so a test can
+    call it and check what comes back over the wire.
+    """
+    if "bedrock_agentcore" in sys.modules:
+        return
+
+    class _App:
+        def __init__(self):
+            self.entry = None
+
+        def entrypoint(self, fn):
+            self.entry = fn
+            return fn
+
+        def run(self):
+            pass
+
+    import types
+    root = types.ModuleType("bedrock_agentcore")
+    runtime = types.ModuleType("bedrock_agentcore.runtime")
+    runtime.BedrockAgentCoreApp = _App
+    root.runtime = runtime
+    sys.modules["bedrock_agentcore"] = root
+    sys.modules["bedrock_agentcore.runtime"] = runtime
+
+
 def _load_agent(name: str):
     import importlib.util
+    _stub_agentcore()
     os.environ["AFC_USE_LLM"] = "0"
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "agents", name, "src", "main.py")
@@ -514,6 +547,40 @@ def _load_agent(name: str):
     sys.modules[spec.name] = m
     spec.loader.exec_module(m)
     return m
+
+
+def test_entrypoint_yields_json_string():
+    """The exact contract the platform parses, and the one that broke.
+
+    A returned list comes back as something the runtime cannot read off the
+    SSE stream, and the platform reports NO_PARSE - which looks like a broken
+    agent rather than a formatting mistake. So: a generator, yielding a string,
+    that parses as a JSON array of commands.
+    """
+    print("=== entrypoint yields a parseable JSON string ===")
+    import asyncio, inspect, json as _json
+
+    m = _load_agent("ai-gk")
+    entry = m.app.entry
+    assert entry is not None, "no entrypoint registered"
+    assert inspect.isasyncgenfunction(entry) or inspect.isgeneratorfunction(entry), \
+        "entrypoint must be a generator that yields, not a function that returns"
+
+    payload = {"prompt": _json.dumps(_platform_payload(0))}
+
+    async def drive():
+        chunks = [c async for c in entry(payload, None)]
+        assert chunks, "entrypoint yielded nothing"
+        last = chunks[-1]
+        assert isinstance(last, str), f"must yield a str, got {type(last).__name__}"
+        cmds = _json.loads(last)
+        assert isinstance(cmds, list) and cmds, "must be a non-empty JSON array"
+        assert cmds[0]["commandType"] in VALID, cmds[0]
+        assert cmds[0]["playerId"] == 0, "GK runtime must answer as player 0"
+        return last
+
+    got = asyncio.run(drive())
+    print(f"  [ok] yielded str -> {got[:70]}\n")
 
 
 def test_agents_pin_their_player():
@@ -576,6 +643,7 @@ if __name__ == "__main__":
     test_squad_runs_without_gateway()
     test_tools_reach_the_agent()
     test_tool_handlers()
+    test_entrypoint_yields_json_string()
     test_agents_pin_their_player()
     test_agent_pin_beats_bad_routing()
     test_agents_share_one_lib()
