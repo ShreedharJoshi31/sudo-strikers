@@ -100,18 +100,20 @@ OUTFIELD: tuple[str, ...] = tuple(c for c in COMMAND_TYPES if c not in GK_ONLY)
 #: never emits them either.
 RECOVERY: tuple[str, ...] = ("CLEAR_OVERRIDE", "RESET")
 
-#: Also withheld, for a different reason: the model cannot fill it in.
+#: Nothing is withheld for capability reasons any more.
 #:
-#: FOLLOW_PLAYER is the only command needing target_player_id AND target_team
-#: together. Measured against Nova Micro over 10 decisions: it answered targets
-#: `82`, `83` and `825` — digits apparently scraped out of coordinates — and 4
-#: of 10 decisions were rejected. Withholding it took the same 10 decisions to
-#: 10/10 accepted with zero errors, and command diversity was unchanged at 3
-#: either way, because MARK already covers "track that opponent" with one
-#: fewer field to get right.
+#: FOLLOW_PLAYER used to be. It is the only command needing target_player_id
+#: AND target_team together, and nova-micro could not do it: over 10 decisions
+#: it answered targets `82`, `83` and `825` - digits apparently scraped out of
+#: coordinates - and 4 of 10 were rejected. Withholding it took that to 10/10.
 #:
-#: Revisit on a larger model: this is a capability limit, not a bad command.
-TOO_HARD: tuple[str, ...] = ("FOLLOW_PLAYER",)
+#: That was a limit of the model, not of the command, and the note here said to
+#: revisit on a bigger one. On nova-lite, re-offered over 8 defensive
+#: decisions: 3 FOLLOW_PLAYER issued, ZERO rejections. So it is back.
+#:
+#: If a smaller model is ever used again, put it back in here rather than
+#: living with the rejections.
+TOO_HARD: tuple[str, ...] = ()
 
 WITHHELD: tuple[str, ...] = RECOVERY + TOO_HARD
 

@@ -58,6 +58,11 @@ CHOOSING WELL
 - They have it: PRESS_BALL if you are nearest. Intensity is one dial - above
   0.3 you challenge, above 0.5 you sprint. Otherwise MARK your man. SLIDE_TACKLE
   only when he is getting away - a miss takes you out of the play.
+- MARK vs FOLLOW_PLAYER: MARK holds a position goal-side of a man and is the
+  default. FOLLOW_PLAYER shadows him wherever he goes, so it is what you want
+  against a runner breaking from deep or a keeper starting an attack - the
+  ball travels further than a marker holding a zone can cover. It costs a
+  `target_team` as well, so it is the more expensive of the two to get right.
 - Ball loose: INTERCEPT if you are closest to where it is going, else MOVE_TO space.
 - Teammate has it: MOVE_TO an angle they can actually play.
 - SET_STANCE changes the team's shape and STICKS. Use it to change the plan,
