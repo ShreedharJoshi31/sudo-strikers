@@ -39,6 +39,7 @@ Pure functions only. No I/O, no network, stdlib and pydantic.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import get_args
@@ -74,6 +75,19 @@ HALF_WIDTH = PITCH_WIDTH / 2.0            # 35.0, the y offset, and the centre l
 
 OWN_GOAL_CENTER = (0.0, HALF_WIDTH)
 OPPONENT_GOAL_CENTER = (PITCH_LENGTH, HALF_WIDTH)
+
+#: Whether to put `playerId` on each emitted command.
+#:
+#: AGENT_PROTOCOL.md section 4 ("How to say it") shows the normative form
+#: WITHOUT it - `[{"commandType":"PASS","parameters":{...},"duration":0}]` - and
+#: states plainly: "You never need to name your own player or your own team.
+#: Both are stamped on for you." The platform's own NO_PARSE error text shows
+#: the same shape. Only the worked examples in section 6 include `playerId`,
+#: and those are illustrative rather than normative.
+#:
+#: So the default is to omit it. Set AFC_EMIT_PLAYER_ID=1 to put it back
+#: without a redeploy of this logic if the platform turns out to want it.
+EMIT_PLAYER_ID = os.environ.get("AFC_EMIT_PLAYER_ID", "0").lower() in ("1", "true", "yes")
 
 TEAM_HOME = 0
 TEAM_AWAY = 1
@@ -505,14 +519,14 @@ def to_wire(command: AgentCommand, transform: Frame, player_index: int) -> list[
     # CLEAR_OVERRIDE and RESET take no parameters.
 
     duration = command.duration
-    return [{
-        "commandType": t,
-        "playerId": int(player_index),
-        "parameters": params,
-        # Integral durations go out as ints to match the documented sample
-        # exactly, in case the platform's deserialiser is stricter than JSON.
-        "duration": int(duration) if float(duration).is_integer() else float(duration),
-    }]
+    wire_command: dict[str, object] = {"commandType": t, "parameters": params}
+    if EMIT_PLAYER_ID:
+        wire_command["playerId"] = int(player_index)
+    # Integral durations go out as ints to match the documented sample exactly,
+    # in case the platform's deserialiser is stricter than JSON.
+    wire_command["duration"] = (
+        int(duration) if float(duration).is_integer() else float(duration))
+    return [wire_command]
 
 
 # Middle fifth of the goal mouth counts as central; outside it, pick a corner.

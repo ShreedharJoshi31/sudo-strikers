@@ -91,6 +91,19 @@ echo "  deployed: ${DEPLOYED[*]:-none}"
 echo "  failed:   ${FAILED[*]:-none}"
 echo "=========================================="
 [ ${#FAILED[@]} -gt 0 ] && exit 1
+# A deployed version does NOT reach an existing session: AgentCore pins a
+# runtimeSessionId to the container that was live when the session started, and
+# the platform reuses one long-lived session per slot. Without this step the
+# competition keeps running the PREVIOUS build while every hand-made probe runs
+# the new one - a fixed bug that still fails the fitness check. See
+# stop_stale_sessions.py.
+echo ""
+echo "Stopping stale platform sessions so this deploy actually takes effect..."
+if ! python3 "$SCRIPT_DIR/stop_stale_sessions.py" --minutes 120; then
+  echo "  WARNING: could not stop sessions - the platform may still be running"
+  echo "           the previous build. Run stop_stale_sessions.py by hand."
+fi
+
 echo ""
 echo "Register these ARNs with the platform, one per player index:"
 for a in "${DEPLOYED[@]}"; do

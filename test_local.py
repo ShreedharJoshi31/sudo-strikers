@@ -516,6 +516,21 @@ def _load_agent(name: str):
     return m
 
 
+import contextlib as _contextlib
+
+
+@_contextlib.contextmanager
+def _player_id_on():
+    """Emit playerId for the duration of the block, so routing is observable."""
+    import wire
+    was = wire.EMIT_PLAYER_ID
+    wire.EMIT_PLAYER_ID = True
+    try:
+        yield
+    finally:
+        wire.EMIT_PLAYER_ID = was
+
+
 def test_agents_pin_their_player():
     print("=== five runtimes, each pinned to its own player ===")
     for name, idx in AGENT_INDEX.items():
@@ -526,9 +541,15 @@ def test_agents_pin_their_player():
         cmds = m.squad.handle(_platform_payload(idx), my_index=m.MY_PLAYER_INDEX)
         assert isinstance(cmds, list) and cmds, f"{name} returned nothing"
         for c in cmds:
-            assert c["playerId"] == idx, f"{name} emitted for player {c['playerId']}"
+            # playerId is omitted by default (AGENT_PROTOCOL.md section 4: the
+            # platform stamps the player on for you), so routing is checked
+            # against the wire only when it is explicitly switched back on.
+            assert "playerId" not in c, f"{name} emitted playerId by default: {c}"
             assert c["commandType"] in COMMAND_TYPES, f"{name} bad type {c['commandType']}"
             assert "parameters" in c, f"{name} missing parameters: {c}"
+        with _player_id_on():
+            for c in m.squad.handle(_platform_payload(idx), my_index=m.MY_PLAYER_INDEX):
+                assert c["playerId"] == idx, f"{name} emitted for player {c['playerId']}"
         print(f"  [ok] {name:8s} player={idx} {m.ROLE:11s} -> {[c['commandType'] for c in cmds]}")
     print()
 
@@ -537,7 +558,9 @@ def test_agent_pin_beats_bad_routing():
     print("=== a wrong myPlayers must not change who a runtime plays as ===")
     for name, idx in AGENT_INDEX.items():
         m = _load_agent(name)
-        cmds = m.squad.handle(_platform_payload((idx + 2) % 5), my_index=m.MY_PLAYER_INDEX)
+        with _player_id_on():
+            cmds = m.squad.handle(_platform_payload((idx + 2) % 5),
+                                  my_index=m.MY_PLAYER_INDEX)
         assert all(c["playerId"] == idx for c in cmds), \
             f"{name} followed the payload instead of its pin"
     print(f"  [ok] all five ignored a mis-routed myPlayers\n")

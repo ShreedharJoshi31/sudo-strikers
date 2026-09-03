@@ -14,9 +14,15 @@ is the point of splitting them up.
 
 from __future__ import annotations
 
+import json
 import os
 
+import inbound
 from brain import DEFAULT_MODELS, Squad
+
+#: How much of each inbound payload to print. Enough to see the shape and the
+#: first players; not so much that a match floods CloudWatch.
+PAYLOAD_LOG_CHARS = int(os.environ.get("AFC_PAYLOAD_LOG_CHARS", "4000"))
 
 #: Team-wide plan. Identical for all five on purpose: it is the shared doctrine,
 #: and the per-role brief in each agent file is what specialises it.
@@ -51,10 +57,56 @@ def build(app, *, player_index: int, role: str, role_prompt: str,
     )
 
     @app.entrypoint
-    def invoke(payload: dict) -> list[dict]:
-        """The platform sends {"gameState": ..., "teamId": N, "myPlayers": [i]}
-        and expects a JSON ARRAY of commands back."""
-        return squad.handle(payload, my_index=player_index)
+    def invoke(payload, context=None) -> list[dict]:
+        """One platform invocation.
+
+        The second parameter MUST be named `context`: the runtime decides
+        whether to pass a RequestContext by looking at that name, and the
+        context is where the session id lives. The session id is how we know
+        which slot we are being played in, which the pinned index cannot tell
+        us when one runtime is registered in two positions.
+
+        The payload is logged raw and unconditionally. The failure this exists
+        to prevent is silent: an unreadable payload does not raise, it returns
+        the safe default in microseconds and looks like a healthy 200.
+
+        This MUST be a generator. The platform reads the last `data:` line of
+        an SSE stream; a plain return is served as application/json and is
+        rejected with NO_PARSE.
+
+        YIELD THE LIST, NOT A JSON STRING. The runtime already serialises
+        whatever you yield (`_convert_to_sse` -> `json.dumps(obj)`), so
+        `yield json.dumps(cmds)` double-encodes into
+        `data: "[{\\"commandType\\": ...}]"` - a JSON *string* where the
+        platform wants a JSON *array* - and that is a NO_PARSE too. The
+        platform's own error text recommends the double-encoding; it is wrong
+        for this SDK version. Yield the list and let the runtime encode once.
+
+        Nothing may be written to stdout after the yield.
+        """
+        session_id = getattr(context, "session_id", "") or ""
+        try:
+            raw = json.dumps(payload, default=str)
+        except Exception:
+            raw = repr(payload)
+        print(f"[afc:in] player={player_index} session={session_id!r} "
+              f"bytes={len(raw)} payload={raw[:PAYLOAD_LOG_CHARS]}", flush=True)
+
+        try:
+            canonical, notes = inbound.normalise(
+                payload, default_index=player_index, session_id=session_id)
+            index = canonical["myPlayers"][0]
+            if notes:
+                print(f"[afc:in] index={index} team={canonical['teamId']} "
+                      f"notes={'; '.join(notes)}", flush=True)
+            commands = list(squad.handle(canonical, my_index=index))
+        except Exception as exc:
+            print(f"[afc:in] UNREADABLE ({type(exc).__name__}: {exc}) "
+                  f"-> safe default", flush=True)
+            commands = list(squad.handle(payload, my_index=player_index))
+
+        print(f"[afc:out] {json.dumps(commands)}", flush=True)
+        yield commands
 
     # Printed at cold start so the deployed runtime's identity and model show up
     # in CloudWatch. Otherwise the only way to find out which model a position

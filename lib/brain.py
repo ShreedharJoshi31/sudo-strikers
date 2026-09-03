@@ -61,6 +61,22 @@ DEFAULT_DEADLINE = float(os.environ.get("AFC_LLM_DEADLINE", "1.80"))
 DEFAULT_MODEL = os.environ.get("AFC_MODEL_ID", "amazon.nova-micro-v1:0")
 DEFAULT_REGION = os.environ.get("AFC_REGION") or os.environ.get("AWS_DEFAULT_REGION")
 
+#: Commands the model must never be allowed to play.
+#:
+#: Both are valid, both are accepted by the platform, and both give away the
+#: thing we are here to do:
+#:   CLEAR_OVERRIDE - hands this player back to the engine's own built-in AI,
+#:                    so the agent stops playing for the rest of that hold.
+#:   RESET          - wipes every override across the WHOLE TEAM, so one
+#:                    player's bad tick benches the other four as well.
+#:
+#: Observed in production: a small model picks these when the situation looks
+#: quiet, because "hand it back" reads as a safe, humble answer. It is the most
+#: expensive answer on the list. Rejecting them costs nothing - `decide` has
+#: already computed a valid policy command before the model was ever asked.
+SURRENDER_COMMANDS = frozenset({"CLEAR_OVERRIDE", "RESET"})
+
+
 #: The four roles a player can hold. Index 0 is always the keeper; the rest
 #: come from the formation (see wire.DEFAULT_ROLES).
 ROLES: tuple[str, ...] = ("GK", "DEFENDER", "MIDFIELDER", "FORWARD")
@@ -405,6 +421,12 @@ class Squad:
         """
         if cmd is None:
             self.stats.note_rejection("no command returned")
+            return None
+        if cmd.type in SURRENDER_COMMANDS:
+            # Well-formed, accepted by the platform, and self-harming. See
+            # SURRENDER_COMMANDS. Treat exactly like a hallucination: keep the
+            # policy command that was already computed, and make it visible.
+            self.stats.note_rejection(f"surrender command {cmd.type}")
             return None
         ok, reason = wire.validate(cmd, obs)
         if not ok:
