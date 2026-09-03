@@ -62,11 +62,15 @@ async def stats():
 
 @app.get("/ping")
 async def ping():
+    # Gateway tools load lazily on the first LLM decision, so before kickoff
+    # this reports configured-but-not-yet-connected. That is expected; check it
+    # again once a match has started to confirm the tools actually arrived.
     return {"ok": True, "llm": USE_LLM,
             "models": brain_mod.DEFAULT_MODELS,
             "deadline_s": squad.deadline,
             "analysis": brain_mod.USE_ANALYSIS, "memory": brain_mod.USE_MEMORY,
-            "scouting": brain_mod.USE_SCOUTING}
+            "scouting": brain_mod.USE_SCOUTING,
+            "gateway": squad.gateway.status()}
 
 
 if __name__ == "__main__":

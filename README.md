@@ -9,54 +9,75 @@ repos you had:
   stateless per-tick inference, normalised coordinates, and the baseline AI
   whose thresholds seed `lib/policy.py`.
 
-It speaks the platform contract natively, so no translation shim is needed:
+It speaks the real platform contract, handled in `lib/wire.py`:
 
 ```
 POST /invocations
-body: {"player_id": "H3", "observation": {...}}
-resp: {"type": "PASS", "target_player_id": "H4", "target": null, "rationale": "..."}
+body: {"gameState": {...}, "teamId": 0, "myPlayers": [3]}
+resp: [{"commandType": "PASS", "playerId": 3,
+        "parameters": {"target_player_id": 4, "type": "GROUND"}, "duration": 0.0}]
 ```
 
 ## The one idea
 
-The platform throws away any response that arrives after the decision budget
-and substitutes `IDLE` — stand still. A 2-minute match at a 2-second interval
-is 60 decisions per player, so every late answer is a decision lost.
+A decision that misses the platform's budget does **not** idle the player — it
+leaves their LAST command running. A bad or late answer is therefore not a
+wasted tick, it is a wasted tick that keeps going.
 
 So the model is never on the critical path:
 
 ```
-decide(player_id, observation)
+handle(payload)
   │
-  ├─ 1. policy.decide(...)      ~0.003 ms, always a valid command
-  ├─ 2. ask the model           hard deadline at 0.70 s
+  ├─ 1. policy.decide(...)      microseconds, always a valid command
+  ├─ 2. ask the model           hard deadline at AFC_LLM_DEADLINE (1.8 s)
   └─ 3. use the model's answer only if it arrived in time and passed checks
 ```
 
 A late model answer costs nothing, because a valid command already exists.
-Without step 1 it costs the whole tick.
+Without step 1 the player carries on running a stale order.
 
 ## Layout
 
 ```
 afc-contender/
-├── lib/
-│   ├── command.py     AgentCommand — the only contract with the platform
-│   ├── policy.py      pure-Python policy; every threshold lives in Params
-│   ├── analysis.py    derived features handed to the model (the "tools")
-│   ├── memory.py      per-player short-term memory, in process
-│   ├── prompts.py     per-role system prompts
+├── agents/                  five deployable agents, one per position
+│   ├── ai-gk/src/main.py        player 0  GK
+│   ├── ai-def1/src/main.py      player 1  DEFENDER
+│   ├── ai-def2/src/main.py      player 2  DEFENDER
+│   ├── ai-mid/src/main.py       player 3  MIDFIELDER
+│   └── ai-fwd/src/main.py       player 4  FORWARD
+├── lib/                     shared by all five — single source of truth
+│   ├── command.py     AgentCommand — the platform contract
+│   ├── wire.py        payload in, wire commands out
+│   ├── policy.py      pure-Python policy; thresholds live in Params
+│   ├── passing.py     interception model
+│   ├── scouting.py    per-opponent profiling
+│   ├── analysis.py    derived features pushed into the prompt
+│   ├── memory.py      per-player short-term memory
+│   ├── gateway.py     MCP tools the model can pull
+│   ├── prompts.py     system prompt builder
+│   ├── runtime_app.py wiring shared by the five entrypoints
 │   └── brain.py       Squad: deadline-guarded LLM over the policy
-├── serve.py           local HTTP server (transport: http)
-├── runtime/main.py    AgentCore Runtime entrypoint (transport: agentcore)
-├── team.yaml          team definition for the arena
-├── test_local.py      no AWS, no LLM, no server
-├── bench.py           deterministic matches vs the baseline + parameter sweeps
-└── deploy.sh          staged deploy to AgentCore
+├── gateway_tools/           four Lambda handlers behind AgentCore Gateway
+├── serve.py                 local HTTP server (serves all five in one process)
+├── team.yaml                team definition
+├── test_local.py            no AWS, no LLM, no server
+├── bench.py                 deterministic matches + parameter sweeps
+├── deploy-all.sh            stage + deploy the five agents
+├── manage_gateway.py        create the Gateway, register the tools
+└── deploy_gateway.sh        package the Lambdas, then the above
 ```
 
-`lib/` is the single source of truth. `deploy.sh` copies it into `_build/` at
-deploy time rather than duplicating it per player.
+Each agent file declares only three things — `MY_PLAYER_INDEX`, `ROLE` and
+`ROLE_PROMPT`. Everything else is in `lib/`, so a fix lands once rather than in
+four files out of five. `deploy-all.sh` copies `lib/` into each bundle at deploy
+time; it is never duplicated in the tree.
+
+The index is **pinned** in the agent file rather than read from `myPlayers`, so
+a runtime deployed as the keeper stays the keeper even if routing sends it
+someone else. A disagreement is recorded in `/stats` rather than silently
+followed.
 
 ## Run it
 
@@ -168,12 +189,17 @@ Start on Nova Micro everywhere. Promote a position to a bigger model only after
 
 ```bash
 pip install bedrock-agentcore-starter-toolkit
-AWS_DEFAULT_REGION=us-east-1 ./deploy.sh
+AWS_DEFAULT_REGION=us-east-1 ./deploy-all.sh          # all five
+AWS_DEFAULT_REGION=us-east-1 ./deploy-all.sh ai-gk    # just one
 ```
 
-One runtime serves all five players — the platform sends `player_id` with every
-call. Deploy five copies only if the competition requires an endpoint per
-player; the code does not change for that.
+Five separate AgentCore runtimes, one per position. That buys per-position model
+choice (`AFC_MODEL_MIDFIELDER=...` only affects the midfielder) and independent
+failure — a broken forward does not take the defence down with it. The script
+prints the ARN for each player index at the end.
+
+Locally, `serve.py` still serves all five from one process; there is nothing to
+deploy to test.
 
 ## Where it stands
 

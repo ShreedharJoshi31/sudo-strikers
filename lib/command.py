@@ -87,18 +87,65 @@ DEFAULT_PASS_TYPE = "GROUND"     # the safest of the three
 DEFAULT_DISTRIBUTION = "THROW"   # accurate; KICK is the long, low-percentage option
 DEFAULT_TIGHTNESS = "TIGHT"
 
+#: What the model is told about each command. These strings are spliced
+#: straight into the system prompt by prompts.py, so they must name the fields
+#: each command REQUIRES.
+#:
+#: Naming them is not decoration. `target` is a real field (MOVE_TO uses it),
+#: and a model told only "strike at the goal" fills in `target: [110, 35]` and
+#: omits `aim_location` — which raises in _check_parameters and costs the whole
+#: decision. Measured against Nova Micro: 4 of 6 SHOOTs failed exactly that way
+#: before these strings named the fields.
 DOCS: dict[str, str] = {
-    "MOVE_TO": "Run to a point. Take space, cover a passing lane, or get back into shape.",
-    "FOLLOW_PLAYER": "Shadow one player at a fixed distance. Use to track a runner rather than hold a zone.",
-    "SHOOT": "Strike at the opponent goal. Use when the lane to a corner is open.",
-    "PASS": "Play the ball to a teammate. GROUND is safest; THROUGH plays the space behind them.",
-    "GK_DISTRIBUTE": "Keeper only. Restart from the back once you hold it. THROW is accurate, KICK is long.",
-    "PRESS_BALL": "Close down whoever has the ball. Above 0.5 you sprint, above 0.3 you attempt tackles.",
-    "MARK": "Stay goal-side of one opponent. Use when a teammate is already pressing the ball.",
-    "INTERCEPT": "Move onto the ball's path to cut it out. Use when it is loose or in flight.",
-    "SET_STANCE": "Change the team's overall shape. Sticky: it lasts until something changes it.",
-    "CLEAR_OVERRIDE": "Drop your standing order and go back to normal play. Sticky.",
-    "RESET": "Clear every team override at once. Sticky: only to recover from a bad state.",
+    "MOVE_TO": (
+        "Run to a point. Needs `target` [x, y]; optional `sprint`. "
+        "Take space, cover a passing lane, or get back into shape."
+    ),
+    "FOLLOW_PLAYER": (
+        "Shadow one player. Needs `target_player_id` AND `target_team` "
+        "(\"HOME\" or \"AWAY\"); optional `distance`. Use to track a runner "
+        "rather than hold a zone."
+    ),
+    "SHOOT": (
+        "Strike at the opponent goal. Needs `aim_location`, one of "
+        "\"TL\" \"TR\" \"BL\" \"BR\" \"CENTER\"; optional `power` 0-1. "
+        "Do NOT use `target` — you pick a corner, not a coordinate. "
+        "Use when the lane to a corner is open."
+    ),
+    "PASS": (
+        "Play the ball to a teammate. Needs `target_player_id`; optional "
+        "`pass_type` \"GROUND\" (safest), \"AERIAL\", or \"THROUGH\" "
+        "(plays the space behind them)."
+    ),
+    "GK_DISTRIBUTE": (
+        "Keeper only. Restart from the back once you hold it. Needs "
+        "`target_player_id`; optional `method` \"THROW\" (accurate) or "
+        "\"KICK\" (long)."
+    ),
+    "PRESS_BALL": (
+        "Close down whoever has the ball. Optional `intensity` 0-1: above 0.3 "
+        "you attempt tackles, above 0.5 you sprint."
+    ),
+    "MARK": (
+        "Stay goal-side of one opponent. Needs `target_player_id`; optional "
+        "`tightness` \"LOOSE\" or \"TIGHT\". Use when a teammate is already "
+        "pressing the ball."
+    ),
+    "INTERCEPT": (
+        "Move onto the ball's path to cut it out. Optional `aggressive`. "
+        "Use when the ball is loose or in flight."
+    ),
+    "SET_STANCE": (
+        "Change the team's overall shape. Needs `stance`: 0 balanced, "
+        "1 attacking, 2 defensive. Sticky: it lasts until something changes it."
+    ),
+    "CLEAR_OVERRIDE": (
+        "Drop your standing order and go back to normal play. Takes nothing. Sticky."
+    ),
+    "RESET": (
+        "Clear every team override at once. Takes nothing. Sticky: only to "
+        "recover from a bad state."
+    ),
 }
 
 

@@ -264,6 +264,12 @@ def test_models_per_role():
             else:
                 os.environ[k] = v
         importlib.reload(brain_mod)
+        # Reloading rebuilds every class in the module, so the name bound by
+        # `from brain import Squad` at import time now points at a dead class.
+        # Rebind it, or a later test patching brain.Squad patches something no
+        # live object is an instance of — which fails as a confusing assertion
+        # about the feature under test rather than about module identity.
+        globals()["Squad"] = brain_mod.Squad
 
 
 def test_memory():
@@ -333,6 +339,221 @@ def test_memory_reaches_model():
     print(f"  [ok] {sent['your_recent_ticks']}\n")
 
 
+
+
+# ---------------------------------------------------------------------------
+# Gateway: tool wiring and — mostly — that every failure degrades safely.
+# ---------------------------------------------------------------------------
+
+import gateway as GW                      # noqa: E402
+
+
+def test_gateway_off_by_default():
+    print("=== no AFC_GATEWAY_URL: everything inert ===")
+    g = GW.GatewayTools(url="")
+    assert g.load() == [], "unconfigured gateway must yield no tools"
+    st = g.status()
+    assert st["configured"] is False and st["connected"] is False
+    with GW.session(g):                    # must not raise
+        pass
+    print(f"  [ok] {st}\n")
+
+
+def test_gateway_unreachable_degrades():
+    print("=== configured but unreachable: no tools, no exception ===")
+    g = GW.GatewayTools(url="https://127.0.0.1:9/mcp")   # port 9 discards
+    tools = g.load()
+    assert tools == [], "a dead gateway must not produce tools"
+    assert g.status()["configured"] is True
+    assert g.error is not None, "the failure should be recorded, not swallowed silently"
+    with GW.session(g):                    # must still be usable
+        pass
+    print(f"  [ok] error recorded: {g.error[:60]}\n")
+
+
+def test_gateway_loads_once():
+    print("=== tools fetched once, not per tick ===")
+    calls = {"n": 0}
+
+    class OneShot(GW.GatewayTools):
+        def _transport(self):
+            calls["n"] += 1
+            raise RuntimeError("boom")
+
+    g = OneShot(url="https://example.invalid/mcp")
+    for _ in range(5):
+        g.load()
+    assert calls["n"] <= 1, f"connected {calls['n']} times; must be at most once"
+    print(f"  [ok] {calls['n']} connection attempt across 5 loads\n")
+
+
+def test_squad_runs_without_gateway():
+    print("=== squad still plays with no gateway ===")
+    sq = Squad(use_llm=False)
+    cmd = sq.decide("H4", obs("you"))
+    assert cmd.type in VALID
+    assert sq.gateway.status()["connected"] is False
+    print(f"  [ok] {cmd.type} with gateway inert\n")
+
+
+def test_tools_reach_the_agent():
+    print("=== fetched tools are attached to the Agent ===")
+    sentinel = [object(), object()]
+
+    class Loaded(GW.GatewayTools):
+        def load(self):
+            self._tools = sentinel
+            return sentinel
+
+    captured = {}
+
+    class FakeStrandsAgent:
+        def __init__(self, **kw):
+            captured.update(kw)
+            self.messages = []
+
+        def structured_output(self, cls, text):
+            return AgentCommand(type="SHOOT", parameters={"aim_location": "TL", "power": 0.8})
+
+    sq = Squad(use_llm=True)
+    sq.gateway = Loaded(url="https://example.test/mcp")
+    # Patch via type(sq), not brain.Squad: another test reloads the module, and
+    # after a reload those are different class objects.
+    cls = type(sq)
+    real = cls._ensure_agent
+
+    def patched(self, player_id, o):
+        if player_id in self._agents:
+            return self._agents[player_id]
+        agent = FakeStrandsAgent(tools=self.gateway.load())
+        self._agents[player_id] = agent
+        return agent
+
+    cls._ensure_agent = patched
+    try:
+        sq.decide("H4", obs("you"))
+        assert captured.get("tools") is sentinel, "gateway tools never reached the Agent"
+    finally:
+        cls._ensure_agent = real
+    print(f"  [ok] {len(sentinel)} tools passed through to the Agent\n")
+
+
+def test_tool_handlers():
+    print("=== lambda handlers return sane payloads ===")
+    import sys as _s
+    _s.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "gateway_tools"))
+    import evaluate_position, scout_opponent
+
+    o = obs("you")
+    r = evaluate_position.lambda_handler(
+        {"observation": o, "x": o["pitch"]["length"] - 5, "y": o["pitch"]["width"] / 2}, None)
+    assert "error" not in r, r
+    assert "shot_here" in r and "shot_there" in r
+    print(f"  [ok] evaluate_position from={r['from']} to={r['to']} "
+          f"better={r['better_for_shooting']}")
+
+    off = evaluate_position.lambda_handler({"observation": o, "x": 9999, "y": 0}, None)
+    assert "error" in off, "an off-pitch point must be rejected, not evaluated"
+    print(f"  [ok] off-pitch rejected: {off['error']}")
+
+    s = scout_opponent.lambda_handler({"opponent_id": "A3"}, None)
+    assert s["known"] is False, "no profiles must report unknown, not invent one"
+    s2 = scout_opponent.lambda_handler(
+        {"opponent_id": "A3", "profiles": {"A3": "presses hard, tiring"}}, None)
+    assert s2["known"] is True and "presses" in s2["profile"]
+    print(f"  [ok] scout_opponent unknown-then-known\n")
+
+
+
+
+# ---------------------------------------------------------------------------
+# The five per-position runtimes: each must control its OWN player.
+# ---------------------------------------------------------------------------
+
+AGENT_INDEX = {"ai-gk": 0, "ai-def1": 1, "ai-def2": 2, "ai-mid": 3, "ai-fwd": 4}
+AGENT_ROLE = {"ai-gk": "GK", "ai-def1": "DEFENDER", "ai-def2": "DEFENDER",
+              "ai-mid": "MIDFIELDER", "ai-fwd": "FORWARD"}
+
+
+def _platform_payload(my_index: int, team: str = "home") -> dict:
+    """A payload shaped like the real thing, including the id collision.
+
+    Both teams number their players agentId_0..agentId_4 and the possession
+    field carries no team, which is the trap wire.py exists to handle.
+    """
+    players = []
+    for code, base_x in (("home", -30.0), ("away", 30.0)):
+        for i in range(5):
+            players.append({
+                "agentId": f"agentId_{i}", "teamCode": code,
+                "position": {"x": base_x + i * 4.0, "y": -12.0 + i * 6.0},
+                "velocity": {"x": 0.0, "y": 0.0}, "speed": 0.0,
+                "stamina": 85.0, "isSprinting": False,
+            })
+    return {
+        "gameState": {
+            "gameTime": 42.0, "playMode": 0,
+            "score": {"home": 1, "away": 1},
+            "ball": {"position": {"x": -6.0, "y": 2.0},
+                     "velocity": {"x": 1.0, "y": 0.0},
+                     "possessionAgentId": "agentId_3"},
+            "players": players,
+        },
+        "teamId": 0 if team == "home" else 1,
+        "myPlayers": [my_index],
+    }
+
+
+def _load_agent(name: str):
+    import importlib.util
+    os.environ["AFC_USE_LLM"] = "0"
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "agents", name, "src", "main.py")
+    spec = importlib.util.spec_from_file_location(f"agent_{name}", path)
+    m = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = m
+    spec.loader.exec_module(m)
+    return m
+
+
+def test_agents_pin_their_player():
+    print("=== five runtimes, each pinned to its own player ===")
+    for name, idx in AGENT_INDEX.items():
+        m = _load_agent(name)
+        assert m.MY_PLAYER_INDEX == idx, f"{name} controls {m.MY_PLAYER_INDEX}, expected {idx}"
+        assert m.ROLE == AGENT_ROLE[name], f"{name} is {m.ROLE}, expected {AGENT_ROLE[name]}"
+        assert m.ROLE_PROMPT.strip(), f"{name} has an empty role brief"
+        cmds = m.squad.handle(_platform_payload(idx), my_index=m.MY_PLAYER_INDEX)
+        assert isinstance(cmds, list) and cmds, f"{name} returned nothing"
+        for c in cmds:
+            assert c["playerId"] == idx, f"{name} emitted for player {c['playerId']}"
+            assert c["commandType"] in COMMAND_TYPES, f"{name} bad type {c['commandType']}"
+            assert "parameters" in c, f"{name} missing parameters: {c}"
+        print(f"  [ok] {name:8s} player={idx} {m.ROLE:11s} -> {[c['commandType'] for c in cmds]}")
+    print()
+
+
+def test_agent_pin_beats_bad_routing():
+    print("=== a wrong myPlayers must not change who a runtime plays as ===")
+    for name, idx in AGENT_INDEX.items():
+        m = _load_agent(name)
+        cmds = m.squad.handle(_platform_payload((idx + 2) % 5), my_index=m.MY_PLAYER_INDEX)
+        assert all(c["playerId"] == idx for c in cmds), \
+            f"{name} followed the payload instead of its pin"
+    print(f"  [ok] all five ignored a mis-routed myPlayers\n")
+
+
+def test_agents_share_one_lib():
+    print("=== agent files stay thin; logic lives in lib/ ===")
+    import pathlib
+    for name in AGENT_INDEX:
+        p = pathlib.Path("agents") / name / "src" / "main.py"
+        lines = [l for l in p.read_text().splitlines()
+                 if l.strip() and not l.strip().startswith("#")]
+        assert len(lines) < 70, f"{name}/src/main.py has {len(lines)} lines; logic is leaking out of lib/"
+    print(f"  [ok] all five under 70 significant lines\n")
+
+
 if __name__ == "__main__":
     test_all_situations()
     test_gk_holds_the_angle()
@@ -349,4 +570,13 @@ if __name__ == "__main__":
     test_llm_error_falls_back()
     test_llm_invalid_rejected()
     test_memory_reaches_model()
+    test_gateway_off_by_default()
+    test_gateway_unreachable_degrades()
+    test_gateway_loads_once()
+    test_squad_runs_without_gateway()
+    test_tools_reach_the_agent()
+    test_tool_handlers()
+    test_agents_pin_their_player()
+    test_agent_pin_beats_bad_routing()
+    test_agents_share_one_lib()
     print("All local tests passed.")

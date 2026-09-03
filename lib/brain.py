@@ -37,6 +37,7 @@ import wire
 from command import SAFE_DEFAULT, AgentCommand
 from memory import SquadMemory
 from scouting import Scout
+import gateway as gateway_mod
 from policy import DEFAULT, Params, Policy
 
 
@@ -177,6 +178,8 @@ class Squad:
                 self.models[role.upper()] = mid
         self.region = region or DEFAULT_REGION
         self.stats = Stats()
+        # Built even when no Gateway is configured; it is inert until loaded.
+        self.gateway = gateway_mod.GatewayTools()
         self._agents: dict[str, object] = {}
         self._pool: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(max_workers=5) if use_llm else None
@@ -207,8 +210,12 @@ class Squad:
         # Recorded so /stats can show which model actually served each position,
         # rather than which one the config intended.
         self.stats.models[player_id] = f"{role}:{model_id}"
+        # Fetched once, on the first player built; [] when no Gateway is
+        # configured or it cannot be reached, which is the pre-Gateway agent.
+        tools = self.gateway.load()
         agent = Agent(
             model=BedrockModel(**kwargs),
+            tools=tools,
             system_prompt=prompts.build(
                 role=role,
                 number=me.get("number", 0),
@@ -252,7 +259,8 @@ class Squad:
     def _think(self, player_id: str, obs: dict, model_input: str) -> AgentCommand:
         agent = self._agents[player_id]  # created by decide() before submit
         agent.messages = []  # stateless: context growth is latency growth
-        return agent.structured_output(AgentCommand, model_input)
+        with gateway_mod.session(self.gateway):
+            return agent.structured_output(AgentCommand, model_input)
 
     # --------------------------------------------------------------- decide
     def decide(self, player_id: str, obs: dict) -> AgentCommand:
@@ -301,12 +309,17 @@ class Squad:
         return finish(checked, "llm")
 
     # ------------------------------------------------------------ platform
-    def handle(self, payload: dict) -> list[dict]:
+    def handle(self, payload: dict, my_index: int | None = None) -> list[dict]:
         """One platform invocation, end to end: payload in, wire commands out.
 
         Lives here rather than in each entrypoint so the HTTP server and the
         AgentCore runtime cannot drift apart on the part that has to be exactly
         right - which team a player belongs to, and which way they are kicking.
+
+        `my_index` pins which player this process controls. A per-position
+        runtime passes its own index so a missing or wrong `myPlayers` cannot
+        make the keeper play as a forward; the local server leaves it None and
+        takes whatever the payload says, because it serves all five.
 
         Never raises. A thrown exception here would be a missed decision, and a
         missed decision does not idle the player, it leaves the LAST command
@@ -318,7 +331,16 @@ class Squad:
             if not isinstance(state, dict):
                 raise ValueError("payload has no gameState")
             mine = payload.get("myPlayers") or []
-            my_index = int(mine[0]) if mine else 0
+            sent = int(mine[0]) if mine else None
+            if my_index is None:
+                my_index = sent if sent is not None else 0
+            elif sent is not None and sent != my_index:
+                # Worth surfacing: it means the platform's routing and this
+                # deployment disagree about who this runtime is. The pin wins,
+                # because a runtime prompted as a keeper should not start
+                # issuing forward commands on someone else's behalf.
+                self.stats.note_rejection(
+                    f"routing: payload says player {sent}, this runtime is {my_index}")
 
             obs = wire.to_observation(payload, my_index=my_index)
             if USE_SCOUTING:
@@ -339,7 +361,9 @@ class Squad:
         except Exception as exc:  # noqa: BLE001 - a raise here costs the tick
             self.stats.note_rejection(f"handle: {type(exc).__name__}: {exc}"[:80])
             try:
-                idx = int((payload.get("myPlayers") or [0])[0])
+                idx = my_index
+                if idx is None:
+                    idx = int((payload.get("myPlayers") or [0])[0])
                 return wire.to_wire(SAFE_DEFAULT, wire.frame_for(payload), idx)
             except Exception:
                 return [{"commandType": SAFE_DEFAULT.type, "playerId": 0,

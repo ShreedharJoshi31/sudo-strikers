@@ -1,8 +1,8 @@
-default_agent: afc_contender
+default_agent: afc_gk_agent
 agents:
-  afc_contender:
-    name: afc_contender
-    entrypoint: main.py
+  afc_gk_agent:
+    name: afc_gk_agent
+    entrypoint: src/main.py
     deployment_type: direct_code_deploy
     runtime_type: PYTHON_3_12
     platform: linux/arm64

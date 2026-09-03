@@ -1,0 +1,5 @@
+# Deployed runtime only. No fastapi/uvicorn — AgentCore provides the server.
+pydantic>=2.7
+strands-agents>=1.0.0
+bedrock-agentcore>=1.0.3
+aws-opentelemetry-distro>=0.10.0
