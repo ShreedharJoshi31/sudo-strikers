@@ -308,7 +308,7 @@ class Squad:
             # that only guarded the model would leave the policy free to do
             # the same thing, and the policy is what plays most ticks.
             try:
-                cmd, why = guardrails.apply(cmd, obs)
+                cmd, why = guardrails.apply(cmd, obs, fallback=safe)
                 if why:
                     self.stats.note_rejection(f"guardrail: {why}")
             except Exception as exc:  # noqa: BLE001 - never lose a tick to a rule

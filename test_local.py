@@ -715,6 +715,38 @@ def test_prompt_never_names_a_withheld_command():
         print(f"  [ok] {role:11s} names all {len(offered(role))} offered, none of {len(WITHHELD)} withheld")
     print()
 
+
+
+def test_cannot_kick_a_ball_you_do_not_have():
+    """PASS/SHOOT/GK_DISTRIBUTE without possession is a wasted tick.
+
+    Measured: with a TEAMMATE on the ball the model answered PASS on 3 of 3
+    ticks. wire.validate accepts it - the platform would not drop it, it just
+    does nothing - so it reads as a healthy decision and is not.
+    """
+    import guardrails
+    from policy import Policy
+    print("=== ball-required commands need the ball ===")
+    pol = Policy()
+    for poss, expect_kind in (("teammate", "support"), ("opponent", "defend"), ("loose", "chase")):
+        o = obs(poss, me_role="MIDFIELDER")
+        fb = pol.decide("home_3", o)
+        for cmd in (AgentCommand(type="PASS", target_player_id=4, pass_type="GROUND"),
+                    AgentCommand(type="SHOOT", aim_location="BL", power=0.8)):
+            out, why = guardrails.apply(cmd, o, fallback=fb)
+            assert out.type not in guardrails.BALL_REQUIRED, \
+                f"{poss}: {cmd.type} survived as {out.type} without the ball"
+            assert why, "the substitution must be reported"
+        print(f"  [ok] {poss:9s} -> {out.type} ({expect_kind})")
+
+    # And it must not fire when we DO have the ball.
+    o = obs("you", me_role="MIDFIELDER")
+    o["you"]["position"] = [45.0, 35.0]
+    keep = AgentCommand(type="PASS", target_player_id=4, pass_type="GROUND")
+    out, why = guardrails.apply(keep, o, fallback=pol.decide("home_3", o))
+    assert out.type == "PASS" and why is None, f"PASS with the ball was changed: {why}"
+    print("  [ok] with the ball, PASS is untouched\n")
+
 if __name__ == "__main__":
     test_all_situations()
     test_gk_holds_the_angle()
@@ -746,4 +778,5 @@ if __name__ == "__main__":
     test_challenge_the_carrier()
     test_guardrails_leave_good_commands_alone()
     test_prompt_never_names_a_withheld_command()
+    test_cannot_kick_a_ball_you_do_not_have()
     print("All local tests passed.")
